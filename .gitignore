@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Project / local secrets and assets (per plan §15: sensitive local files must not be committed)
+.env
+.env.*
+*.blend
+*.blend1
+auth.json
+**/oauth_cache/
+
+# Generated artifacts (UV results, previews, job outputs)
+/out/
+/.context/runs/
+*.uvsolution.json
