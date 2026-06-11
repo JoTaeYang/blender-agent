@@ -30,3 +30,6 @@ auth.json
 # Large sample meshes (exceed GitHub 100MB limit; small references like humanstatue_low.obj stay tracked)
 /sample/humanstatue.obj
 /sample/anchor.obj
+
+# All mesh assets out of git (user request 2026-06-11)
+*.obj
