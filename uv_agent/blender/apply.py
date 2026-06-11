@@ -48,6 +48,44 @@ def apply_uv_coordinates(obj, solution: UVSolution, *, layer_name: str = AI_UV_L
     return written
 
 
+def apply_smoothing_split_by_edges(obj, edge_ids, *, smooth_faces: bool = True) -> int:
+    """Split normal smoothing at the given edges (the UV island boundaries).
+
+    Implements the ``split_smoothing_by_uv_islands`` feature. Blender does not
+    manage 3ds-Max-style smoothing group ids; a normal split is expressed by a
+    *sharp edge* on top of *smooth faces*. So this:
+
+    - (optionally) sets every face to smooth shading, so island interiors stay
+      smooth and shading actually splits at the marked edges;
+    - marks each edge in ``edge_ids`` as sharp (``use_edge_sharp = True``),
+      which is where the UV islands meet, so normals break there.
+
+    Existing sharp edges are preserved (we only add, never clear) -- clearing is
+    left to a future ``clear_previous_ai_sharp_edges`` option. Passing an empty
+    / ``None`` ``edge_ids`` is safe and only (optionally) re-smooths faces.
+
+    Pure ``obj.data`` access (no ``bpy`` import) so it is unit-testable with a
+    fake mesh; it only does something meaningful inside Blender.
+
+    Returns the number of edges marked sharp.
+    """
+    mesh = obj.data
+    edge_set = set(edge_ids or [])
+
+    if smooth_faces:
+        for poly in mesh.polygons:
+            poly.use_smooth = True
+
+    sharp_count = 0
+    for e in mesh.edges:
+        if e.index in edge_set:
+            e.use_edge_sharp = True
+            sharp_count += 1
+
+    mesh.update()
+    return sharp_count
+
+
 def apply_checker_material(obj, *, name: str = "AI_UV_Checker"):
     """Attach a checker-texture material so the UV layout is visible in renders
     (plan §7.4 "checker material 적용"). Only runs inside Blender."""

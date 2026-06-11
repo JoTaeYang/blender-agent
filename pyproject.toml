@@ -21,7 +21,7 @@ llm = ["openai>=1.0"]
 uv-agent-demo = "uv_agent.demo:main"
 
 [tool.setuptools.packages.find]
-include = ["uv_agent*"]
+include = ["uv_agent*", "retopo_agent*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

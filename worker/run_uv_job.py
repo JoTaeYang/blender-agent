@@ -15,6 +15,7 @@ Run inside Blender:
       "angle_threshold": 30,
       "padding_px": 8,
       "texture_size_px": 1024,
+      "split_smoothing_by_uv_islands": false,  # mark UV island borders sharp
       "out_dir": "out/job_123"
     }
 
@@ -62,7 +63,11 @@ def main() -> int:
 
     from uv_agent.agent.llm import get_provider
     from uv_agent.agent.pipeline import UVAgentPipeline
-    from uv_agent.blender.apply import apply_checker_material, apply_uv_coordinates
+    from uv_agent.blender.apply import (
+        apply_checker_material,
+        apply_smoothing_split_by_edges,
+        apply_uv_coordinates,
+    )
     from uv_agent.blender.extract import extract_mesh_graph
     from uv_agent.geometry.preview import uv_layout_svg
     from uv_agent.planner.island_planner import PlanConstraints
@@ -103,6 +108,10 @@ def main() -> int:
 
     written = apply_uv_coordinates(obj, result.solution, seam_edge_ids=result.plan.seam_edge_ids)
     print(f"run_uv_job: wrote {written} loop UVs to '{obj.name}'")
+
+    if bool(job.get("split_smoothing_by_uv_islands", False)):
+        sharp = apply_smoothing_split_by_edges(obj, result.plan.seam_edge_ids)
+        print(f"run_uv_job: split smoothing by UV islands -> {sharp} sharp edges")
 
     with open(os.path.join(out_dir, "solution.json"), "w", encoding="utf-8") as fh:
         json.dump(result.solution.to_dict(), fh, indent=2)

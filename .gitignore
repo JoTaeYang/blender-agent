@@ -26,3 +26,7 @@ auth.json
 /out/
 /.context/runs/
 *.uvsolution.json
+
+# Large sample meshes (exceed GitHub 100MB limit; small references like humanstatue_low.obj stay tracked)
+/sample/humanstatue.obj
+/sample/anchor.obj

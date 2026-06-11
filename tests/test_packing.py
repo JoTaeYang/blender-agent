@@ -44,3 +44,48 @@ def test_many_islands_still_fit():
     boxes = [island_bbox(m, i, uvm) for i in plan.islands if i.face_ids]
     for a, b in itertools.combinations(boxes, 2):
         assert not _boxes_overlap(a, b)
+
+
+def _solve_strategy(mesh, strategy, **plan_kw):
+    plan = plan_islands(mesh, constraints=PlanConstraints(padding_px=8, texture_size_px=1024), **plan_kw)
+    uvm = UVMap.for_mesh(mesh)
+    for isl in plan.islands:
+        project_island(mesh, isl.face_ids, uvm, isl.projection)
+    pack_islands(mesh, plan, uvm, strategy=strategy)
+    return plan, uvm
+
+
+def test_maxrects_overlap_free_and_in_bounds():
+    for mesh, kw in [(fixtures.build_cube(), {}), (fixtures.build_cylinder(8, 3), {"angle_threshold": 20})]:
+        plan, uvm = _solve_strategy(mesh, "maxrects", **kw)
+        assert (uvm.uv >= -1e-6).all() and (uvm.uv <= 1 + 1e-6).all()
+        boxes = [island_bbox(mesh, i, uvm) for i in plan.islands if i.face_ids]
+        for a, b in itertools.combinations(boxes, 2):
+            assert not _boxes_overlap(a, b)
+
+
+def test_maxrects_keeps_single_scale():
+    plan = plan_islands(fixtures.build_cube())
+    uvm = UVMap.for_mesh(fixtures.build_cube())
+    m = fixtures.build_cube()
+    for isl in plan.islands:
+        project_island(m, isl.face_ids, uvm, isl.projection)
+    tr = pack_islands(m, plan, uvm, strategy="maxrects")
+    assert len({round(t.scale, 9) for t in tr}) == 1
+
+
+def test_auto_never_worse_than_shelf():
+    # The auto strategy must never report lower packing efficiency than shelf.
+    from uv_agent.geometry.evaluation import evaluate_uv_solution
+
+    cases = [
+        (fixtures.build_cube(), {}),
+        (fixtures.build_grid_plane(4, 4), {}),
+        (fixtures.build_cylinder(8, 3), {"angle_threshold": 20}),
+    ]
+    for mesh, kw in cases:
+        plan_s, uv_s = _solve_strategy(mesh, "shelf", **kw)
+        plan_a, uv_a = _solve_strategy(mesh, "auto", **kw)
+        eff_s = evaluate_uv_solution(mesh, plan_s, uv_s).packing_efficiency
+        eff_a = evaluate_uv_solution(mesh, plan_a, uv_a).packing_efficiency
+        assert eff_a >= eff_s - 1e-6

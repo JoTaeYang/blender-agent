@@ -104,7 +104,8 @@ exec(open("/path/to/brisbane/scripts/blender_unwrap_active.py").read())
 
 Options after `--`: `--object NAME` | `--add SHAPE` | `--import PATH`,
 `--provider {mock,openai_oauth_local,openai_api_key}`, `--intent "..."`,
-`--angle 30`, `--padding 8`, `--texture 1024`, `--svg PATH`, `--save PATH`.
+`--angle 30`, `--padding 8`, `--texture 1024`,
+`--split-smoothing-by-uv-islands`, `--svg PATH`, `--save PATH`.
 
 Verified results (Blender 5.0, `mock` provider):
 
@@ -118,6 +119,51 @@ For the curved/organic cases the agent still writes a usable layout and keeps th
 *best* iteration; reaching `accepted` there needs the post-MVP solvers (xatlas/
 libigl, plan §11) or a real LLM provider instead of the mock heuristic.
 
+### Split smoothing by UV islands (optional)
+
+A post-processing option that breaks normal smoothing at the UV island borders.
+Blender has no 3ds-Max-style smoothing-group ids — a normal split is expressed
+as a **sharp edge** on top of **smooth faces**. So this option marks every UV
+island boundary edge (the same edges as the UV seams) as *sharp* while keeping
+all faces *smooth*, so shading stays smooth inside an island and breaks exactly
+at the seams.
+
+It is **off by default** (existing behavior is unchanged). It does not touch the
+UV unwrap, packing or preview, and it only *adds* sharp flags (existing sharp
+edges are preserved).
+
+CLI:
+
+```bash
+"$BLENDER" --python scripts/blender_unwrap_active.py -- \
+    --add cylinder --split-smoothing-by-uv-islands
+# log: [AI-UV] split smoothing by UV islands: 64 sharp edges
+```
+
+Worker job JSON:
+
+```json
+{
+  "provider": "mock",
+  "user_intent": "unwrap and split smoothing by UV islands",
+  "split_smoothing_by_uv_islands": true
+}
+```
+
+Programmatic (inside Blender):
+
+```python
+from uv_agent.blender.apply import apply_uv_coordinates, apply_smoothing_split_by_edges
+apply_uv_coordinates(obj, result.solution, seam_edge_ids=result.plan.seam_edge_ids)
+apply_smoothing_split_by_edges(obj, result.plan.seam_edge_ids)  # smooth_faces=True
+```
+
+Verified in Blender 5.0: on the cylinder the sharp edge set equals the seam edge
+set (64 == 64) and all faces remain smooth, so smoothing visibly splits at the
+island borders. Future extensions (plan): `split_smoothing_by_material`,
+`split_smoothing_by_angle`, `preserve_existing_sharp_edges`,
+`clear_previous_ai_sharp_edges`.
+
 ## Architecture
 
 ```
@@ -125,9 +171,9 @@ uv_agent/
   geometry/        deterministic engine (numpy)
     mesh_graph.py    Vertex/Edge/Face/Loop + builder + JSON I/O (plan §7.1)
     solution.py      UVMap (per-loop) + UVSolution (plan §7.3)
-    projection.py    planar + cylindrical unwrap (Phase 4)
+    projection.py    planar + cylindrical + strip/grid straightening (Phase 4)
     relaxation.py    boundary-preserving Laplacian relax
-    packing.py       shelf packing into [0,1] with padding (Phase 5)
+    packing.py       MaxRects + shelf packing into [0,1], auto-select (Phase 5)
     evaluation.py    overlap/stretch/angle/texel/packing/seam metrics (Phase 6)
     preview.py       SVG UV-layout preview
   planner/
@@ -141,9 +187,46 @@ uv_agent/
     extract.py         bmesh -> MeshGraph
     apply.py           UVSolution -> AI_UV layer + checker material
   io/fixtures.py     synthetic cube/plane/cylinder for tests + demos
+  io/obj_loader.py   minimal Wavefront OBJ -> MeshGraph (offline, no Blender)
 worker/run_uv_job.py headless Blender worker entrypoint (plan §9.2)
 tests/               pytest suite
 ```
+
+### Packing strategies (packing efficiency)
+
+`pack_islands(..., strategy=...)` supports:
+
+- `"auto"` (default) — runs both packers below and keeps whichever yields the
+  higher `packing_efficiency`, so the result is **never worse than shelf** and
+  improves on irregular island sets.
+- `"maxrects"` — MaxRects (Best-Short-Side-Fit) with 0/90 rotation; fills gaps
+  between differently-sized islands.
+- `"shelf"` — original row/shelf packer.
+
+All three keep a single global scale (texel density preserved) and are
+overlap-free.
+
+### Strip / grid straightening (curved bands → straight)
+
+Planar projection leaves curved bevel/cylinder bands *bent* in UV space. The
+default projection path auto-detects quad **strips** (1-wide chains,
+`project_island_strip`) and quad **grids** (M×N patches, `project_island_grid`,
+Follow-Active-Quads style) and *unrolls* them — accumulating real arc length
+along U and width along V — so they come out as straight rectangles instead of
+arcs. Non-quad / irregular patches fall back to planar.
+
+Combined with the MaxRects packer, on `aaa_no_uv.obj` (1397 faces, 144 islands):
+
+| | shelf + planar | + MaxRects | + strip/grid straightening |
+| --- | --- | --- | --- |
+| `packing_efficiency` | 0.297 | 0.354 | **0.693** |
+| `stretch_score` | 0.179 | 0.179 | **0.045** |
+| `overlap_ratio` | 0 | 0 | 0 |
+
+90 of 144 islands are straightened (64 strips + 26 grids); the rest are
+irregular patches that stay planar. This implements the Phase-3/4 items of
+`.context/uv_sample_alignment_plan.ko.md`; PCA axis-alignment and category-based
+lane layout remain future work.
 
 ## LLM providers (plan §3, §8.4)
 

@@ -19,6 +19,8 @@ Two ways to use it:
 Args after `--`:  --object NAME | --add {cube,suzanne,uvsphere,cylinder,torus}
                   --provider {mock,openai_oauth_local,openai_api_key}
                   --intent "..."  --angle 30  --padding 8  --texture 1024
+                  --split-smoothing-by-uv-islands   (mark UV island borders sharp)
+                  --svg PATH  --save PATH
 """
 
 from __future__ import annotations
@@ -122,7 +124,7 @@ def _resolve_object(opts: dict):
 def run_on_object(obj, opts: dict):
     from uv_agent.agent.llm import get_provider
     from uv_agent.agent.pipeline import UVAgentPipeline
-    from uv_agent.blender.apply import apply_uv_coordinates
+    from uv_agent.blender.apply import apply_smoothing_split_by_edges, apply_uv_coordinates
     from uv_agent.blender.extract import extract_mesh_graph
     from uv_agent.planner.island_planner import PlanConstraints
 
@@ -145,6 +147,10 @@ def run_on_object(obj, opts: dict):
     result = pipeline.run(mesh_graph, opts.get("intent", "unwrap for texturing"), constraints=constraints)
 
     written = apply_uv_coordinates(obj, result.solution, seam_edge_ids=result.plan.seam_edge_ids)
+
+    if opts.get("split-smoothing-by-uv-islands"):
+        sharp = apply_smoothing_split_by_edges(obj, result.plan.seam_edge_ids)
+        print(f"[AI-UV] split smoothing by UV islands: {sharp} sharp edges")
 
     if opts.get("svg"):
         from uv_agent.geometry.preview import uv_layout_svg
