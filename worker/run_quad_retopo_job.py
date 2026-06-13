@@ -517,6 +517,11 @@ def _run_adaptive_mode(bpy, opts: dict, target_faces: int) -> int:
 
     t0 = time.monotonic()
 
+    # --- P5 resume (UV repair plan §6): reopen the A4-accepted mesh blend and run only
+    # P5 (organic UV) + P6 (export/render). Does NOT redo P1–A4.
+    if from_phase == "P5":
+        return _run_adaptive_p5_resume(bpy, opts, target_faces, reference, out_dir, t0)
+
     # --- P1: proxy (fresh build, floater dropped inside) or resume proxy.blend.
     if from_phase == "P1":
         rc, proxy = run_p1(bpy, inp, out_dir, proxy_faces)
@@ -547,7 +552,7 @@ def _run_adaptive_mode(bpy, opts: dict, target_faces: int) -> int:
     print(f"[A4] freed proxy ({proxy_faces_now} faces) before UV/export", flush=True)
 
     # --- P5: auto-UV on the accepted (or best-effort) mesh.
-    p5 = run_p5_uv(bpy, low, out_dir)
+    p5 = run_p5_uv(bpy, low, ref, out_dir, engine=opts.get("uv_engine", "auto"))
 
     # --- P6: export OBJ (v/vt/vn) + blend + fixed-camera side-by-side renders.
     p6 = run_p6_export(bpy, low, ref, out_dir, target_faces, reference)
@@ -576,6 +581,44 @@ def _run_adaptive_mode(bpy, opts: dict, target_faces: int) -> int:
           f"{report['timings_s']['total']}s peak {report['peak_rss_gb']}GB -> {out_dir}",
           flush=True)
     return 0 if gate.passed else 3
+
+
+def _run_adaptive_p5_resume(bpy, opts, target_faces, reference, out_dir, t0) -> int:
+    """Resume at P5 (UV repair plan §6): reopen the A4-accepted mesh blend, import the
+    reference, and run organic P5 + P6 only — P1–A4 are NOT redone."""
+    blend = opts.get("mesh_blend") or os.path.join(out_dir, f"adaptive_t{target_faces}.blend")
+    if not os.path.exists(blend):
+        print(f"run_quad_retopo_job: P5 resume needs {blend} (run A2–A4 first)", file=sys.stderr)
+        return 2
+    bpy.ops.wm.open_mainfile(filepath=os.path.abspath(blend))
+    low = bpy.data.objects.get(f"AI_Adaptive_{target_faces}") or \
+        next((o for o in bpy.data.objects if o.type == "MESH"), None)
+    if low is None:
+        print(f"run_quad_retopo_job: no mesh in {blend}", file=sys.stderr)
+        return 2
+    print(f"[P5] resumed '{low.name}' ({len(low.data.polygons)} faces) from {blend}", flush=True)
+
+    before = set(bpy.data.objects)
+    bpy.ops.wm.obj_import(filepath=os.path.abspath(reference))
+    ref = next(o for o in bpy.data.objects if o not in before and o.type == "MESH")
+    ref.name = "AI_Reference"
+
+    p5 = run_p5_uv(bpy, low, ref, out_dir, engine=opts.get("uv_engine", "auto"))
+    p6 = run_p6_export(bpy, low, ref, out_dir, target_faces, reference)
+
+    report = {
+        "mode": "adaptive", "phase": "P5_resume", "reference": reference,
+        "target_faces": target_faces, "from_blend": blend,
+        "verdict": p5["gate_verdict"], "uv_shippable": p5["shippable"],
+        "p5_uv": p5, "p6_export": p6,
+        "timings_s": {"total": round(time.monotonic() - t0, 1)}, "peak_rss_gb": _peak_rss_gb(),
+    }
+    with open(os.path.join(out_dir, "p5_resume_report.json"), "w", encoding="utf-8") as fh:
+        json.dump(report, fh, indent=2)
+    print(f"[done] P5 resume {target_faces}: UV gate {p5['gate_verdict']} "
+          f"(shippable={p5['shippable']}, fallback_used=False); "
+          f"{report['timings_s']['total']}s -> {out_dir}", flush=True)
+    return 0 if p5["shippable"] else 3
 
 
 def _measure_reference_baseline(bpy, proxy, reference_path: str):
@@ -733,68 +776,197 @@ def _run_adaptive_generate(bpy, proxy, target_faces: int, baseline, out_dir: str
     return {"low": low, "gate": best["gate"], "report": report}
 
 
-def run_p5_uv(bpy, low, out_dir: str) -> dict:
-    """Phase P5 — auto-UV the adaptive mesh via uv_agent (mock provider; Blender-only,
-    no network — plan §8/P5). Seams → unwrap → pack, then write the loop UVs and the
-    UV evaluation (no overlaps / stretch band / margins)."""
-    from uv_agent.agent.llm import get_provider
-    from uv_agent.agent.pipeline import UVAgentPipeline
-    from uv_agent.blender.apply import apply_uv_coordinates
+def _uv_reference_baseline(bpy, ref):
+    """Score the reference asset's own artist UVs (plan §5 'calibrate first'), plus its
+    geometry auto-unwrapped by the same organic pipeline (the *achievable* floor —
+    artist seams are not reproducible automatically). Returns
+    ``(UVReferenceBaseline, report_dict)``."""
     from uv_agent.blender.extract import extract_mesh_graph
+    from uv_agent.blender.organic_unwrap import (
+        build_uv_metrics, island_plan_from_seams, read_uvmap, unwrap_organic,
+    )
+    from uv_agent.geometry.evaluation import evaluate_uv_solution
+    from uv_agent.geometry.uv_gate import UVReferenceBaseline
     from uv_agent.planner.island_planner import PlanConstraints
+    from uv_agent.planner.organic_seams import crease_seam_edges, organic_seam_edges
+
+    mg = extract_mesh_graph(ref)
+    active = ref.data.uv_layers.active
+    artist = {}
+    if active is not None:
+        uv0 = read_uvmap(ref, mg, layer_name=active.name)
+        plan0 = island_plan_from_seams(mg, set(), constraints=PlanConstraints())
+        ev0 = evaluate_uv_solution(mg, plan0, uv0)
+        artist = build_uv_metrics(mg, uv0, ev0)
+
+    # Auto-unwrap the reference geometry the same way we unwrap the AI mesh.
+    seams = organic_seam_edges(mg, n_extremities=12) | crease_seam_edges(mg, percentile=87)
+    unwrap_organic(ref, seams, margin=0.02)
+    uv_a = read_uvmap(ref, mg)
+    plan_a = island_plan_from_seams(mg, seams, constraints=PlanConstraints())
+    ev_a = evaluate_uv_solution(mg, plan_a, uv_a)
+    auto = build_uv_metrics(mg, uv_a, ev_a)
+
+    # Restore the artist layer as active so P6 renders/export are unaffected.
+    if active is not None:
+        ref.data.uv_layers.active = active
+
+    # Gate stretch against the auto-unwrap floor (achievable), not the artist UVs.
+    baseline = UVReferenceBaseline(
+        stretch_score=max(artist.get("stretch_score", 0.2), auto["stretch_score"]),
+        vt_v_ratio=artist.get("vt_v_ratio", 1.13),
+        island_count=int(artist.get("island_count", 1)),
+    )
+    return baseline, {"artist": artist, "auto_unwrap": auto, "baseline": baseline.to_dict()}
+
+
+def run_p5_uv(bpy, low, ref, out_dir: str, *, engine: str = "auto") -> dict:
+    """Phase P5 — auto-UV. ``engine='transfer'`` (the new default when the reference has
+    UVs, UV_TRANSFER_PLAN) transfers the reference's chart LAYOUT onto the mesh — a
+    *semantically* artist-like result. ``engine='chart'`` is the no-reference geometric
+    chart engine; ``engine='organic'`` is the v1 cut-tree pelt. ``engine='auto'`` picks
+    transfer iff the reference carries UVs, else chart. None ships the Smart-UV fallback
+    (hard gate); the gate is reported honestly (best-effort on a hard-gate miss)."""
+    ref_has_uv = ref is not None and len(ref.data.uv_layers) > 0
+    if engine == "auto":
+        engine = "transfer" if ref_has_uv else "chart"
+    if engine == "transfer":
+        return _run_p5_transfer(bpy, low, ref, out_dir)
+    if engine == "chart":
+        return _run_p5_chart(bpy, low, out_dir)
+    return _run_p5_organic(bpy, low, ref, out_dir)
+
+
+def _run_p5_transfer(bpy, low, ref, out_dir: str) -> dict:
+    """Reference-Guided UV Transfer P5 (UV_TRANSFER_PLAN). Fails loud if the reference
+    has no UVs (never silently switches engines)."""
+    from transfer_uv_agent.pipeline import NoReferenceUVError, run_transfer_uv
+    from uv_agent.blender.extract import extract_mesh_graph
 
     t = time.monotonic()
-    constraints = PlanConstraints(padding_px=8, texture_size_px=1024, max_overlap_ratio=0.0)
-    pipeline = UVAgentPipeline(get_provider("mock"), max_iterations=4, angle_threshold=30.0)
-    mg = extract_mesh_graph(low)
-    result = pipeline.run(mg, "adaptive low-poly automatic unwrap", constraints=constraints)
-    written = apply_uv_coordinates(low, result.solution, seam_edge_ids=result.plan.seam_edge_ids)
+    if ref is None or len(ref.data.uv_layers) == 0:
+        raise NoReferenceUVError(
+            "--uv-engine transfer requires a UV'd --reference; none found. "
+            "Use --uv-engine chart for the no-reference geometric engine.")
+    low_mg = extract_mesh_graph(low)
+    ref_mg = extract_mesh_graph(ref)
+    res = run_transfer_uv(low, low_mg, ref, ref_mg)
+    gate, m, rep = res["gate"], res["metrics"], res["report"]
+    shippable = res["shippable"]
 
-    with open(os.path.join(out_dir, "p5_solution.json"), "w", encoding="utf-8") as fh:
-        json.dump(result.solution.to_dict(), fh, indent=2)
-    with open(os.path.join(out_dir, "p5_evaluation.json"), "w", encoding="utf-8") as fh:
-        json.dump(result.to_dict()["evaluation"], fh, indent=2)
+    with open(os.path.join(out_dir, "p5_gate.json"), "w", encoding="utf-8") as fh:
+        json.dump({"engine": "transfer", "chart_count": res["chart_count"], "metrics": m,
+                   "gate": gate.to_dict(), "shippable": shippable, "report": rep,
+                   "placements": res["placements"], "adjustments": res["adjustments"],
+                   "pack_fallback": res["pack_fallback"], "projection": res["projection"],
+                   "seam_count": len(res["seams"])}, fh, indent=2)
 
-    ev = result.evaluation
-    method = "uv_agent"
-    fallback = None
-    # Smart-UV fallback (plan §8/§9 risk row): the planner's seam/unwrap can leave
-    # overlaps on a highly organic tri/quad mesh, which the metrics gate (rightly)
-    # rejects. Rather than ship overlapping UVs, fall back to Blender's Smart UV
-    # Project, which is non-overlapping by construction. The planner result is still
-    # recorded so the fallback is auditable, never silent.
-    if ev.status != "accepted":
-        fallback = _smart_uv_fallback(bpy, low)
-        method = "smart_uv_fallback"
-
-    print(f"[P5] UV: planner status={ev.status} ({written} loop UVs, "
-          f"{len(result.plan.seam_edge_ids)} seams); method={method}"
-          + (f"; fallback={fallback}" if fallback else "")
-          + f"; {time.monotonic() - t:.1f}s", flush=True)
+    print(f"[P5] transfer UV: charts={m['island_count']} (ref={rep['reference_chart_count']}, "
+          f"delta={rep['chart_count_delta']}) raster_overlap={m['raster_overlap_ratio']} "
+          f"overlap={m['overlap_ratio']:.5f} texel_var={m.get('texel_density_variance'):.4f} "
+          f"stretch={m['stretch_score']:.4f} mean_iou={rep['mean_placement_iou']} "
+          f"uncovered_ref={rep['uncovered_count']} local_shrinks={len(res['adjustments'])} | "
+          f"gate={gate.verdict} fails={[c.name for c in gate.failures]} "
+          f"shippable={shippable} | {time.monotonic() - t:.1f}s", flush=True)
     return {
-        "method": method,
-        "planner_status": ev.status,
-        "fallback": fallback,
-        "loop_uvs_written": written,
-        "seam_edges": len(result.plan.seam_edge_ids),
-        "planner_evaluation": result.to_dict()["evaluation"],
+        "method": "transfer", "engine": "transfer", "fallback_used": False,
+        "gate_verdict": gate.verdict, "shippable": shippable,
+        "metrics": m, "gate": gate.to_dict(), "report": rep,
+        "seam_count": len(res["seams"]), "chart_count": res["chart_count"],
+        "placements": res["placements"], "adjustments": res["adjustments"],
     }
 
 
-def _smart_uv_fallback(bpy, low) -> str:
-    """Blender Smart UV Project on ``low`` — a non-overlapping unwrap fallback when the
-    uv_agent planner doesn't pass the metrics gate (plan §8 P5). Replaces the active
-    UV layer in place; the P6 OBJ export then writes these UVs as ``vt``."""
-    import math
+def _run_p5_chart(bpy, low, out_dir: str) -> dict:
+    """Chart engine P5 (chart-UV plan §6–§8)."""
+    from chart_uv_agent.pipeline import run_chart_uv
+    from uv_agent.blender.extract import extract_mesh_graph
 
+    t = time.monotonic()
+    mg = extract_mesh_graph(low)
+    res = run_chart_uv(low, mg)
+    gate, m = res["gate"], res["metrics"]
+    stuck = res["stuck_charts"]
+    shippable = res["shippable"]  # gate.passed OR only convexity_p10 fails with stuck (§5c)
+
+    pre = res.get("metrics_before_correctness", {})
+    with open(os.path.join(out_dir, "p5_gate.json"), "w", encoding="utf-8") as fh:
+        json.dump({"engine": "chart", "chart_count": res["chart_count"], "metrics": m,
+                   "gate": gate.to_dict(), "shippable": shippable, "stuck_charts": stuck,
+                   "metrics_before_correctness": pre, "correctness_history": res.get("correctness"),
+                   "history": res["history"], "seam_count": len(res["seams"])}, fh, indent=2)
+
+    print(f"[P5] correctness round (raster overlap): "
+          f"before raster={pre.get('raster_overlap_ratio')} charts={pre.get('island_count')} "
+          f"stretch={pre.get('stretch_score')} -> after raster={m.get('raster_overlap_ratio')} "
+          f"charts={m['island_count']} stretch={m['stretch_score']:.3f} packing={m['packing_efficiency']:.3f}",
+          flush=True)
+
+    print(f"[P5] chart UV: charts={m['island_count']} stretch={m['stretch_score']:.4f} "
+          f"overlap={m['overlap_ratio']:.5f} raster_overlap={m.get('raster_overlap_ratio')} "
+          f"packing={m['packing_efficiency']:.4f} convex_p10={m.get('convexity_p10')} "
+          f"small={m['small_island_ratio']:.3f} | gate={gate.verdict} "
+          f"fails={[c.name for c in gate.failures]} shippable={shippable} "
+          f"stuck={len(stuck)} | {time.monotonic() - t:.1f}s", flush=True)
+    if stuck:
+        print(f"[P5] U1.7 stuck charts ({len(stuck)}, §5c last round, shipped): "
+              f"{[(s['size'], s['convexity']) for s in stuck[:6]]}", flush=True)
+    return {
+        "method": "chart", "engine": "chart", "fallback_used": False,
+        "gate_verdict": gate.verdict, "shippable": shippable, "stuck_charts": stuck,
+        "metrics": m, "gate": gate.to_dict(), "seam_count": len(res["seams"]),
+        "chart_count": res["chart_count"], "history": res["history"],
+    }
+
+
+def _run_p5_organic(bpy, low, ref, out_dir: str) -> dict:
+    """Organic cut-tree pelt P5 (UV repair plan, Tracks 1+2) — kept as ``--uv-engine
+    organic`` for comparison; never ships the Smart-UV fallback (hard gate)."""
+    from uv_agent.blender.extract import extract_mesh_graph
+    from uv_agent.blender.organic_unwrap import organic_unwrap_with_refinement
+    from uv_agent.geometry.uv_gate import UVGateThresholds
+    from uv_agent.planner.organic_seams import classify_seam_strategy, edge_over_threshold_fraction
+
+    t = time.monotonic()
+    baseline, base_report = _uv_reference_baseline(bpy, ref)
+    print(f"[P5] UV baseline: artist_stretch={base_report['artist'].get('stretch_score')} "
+          f"auto_floor={base_report['auto_unwrap']['stretch_score']:.4f} "
+          f"vt/v_ref={baseline.vt_v_ratio:.3f}", flush=True)
+
+    mg = extract_mesh_graph(low)
+    frac = edge_over_threshold_fraction(mg, 30.0)
+    strategy = classify_seam_strategy(mg, angle_threshold=30.0)
     _activate_only(bpy, low)
-    bpy.ops.object.mode_set(mode="EDIT")
-    try:
-        bpy.ops.mesh.select_all(action="SELECT")
-        bpy.ops.uv.smart_project(angle_limit=math.radians(66.0), island_margin=0.02)
-    finally:
-        bpy.ops.object.mode_set(mode="OBJECT")
-    return "smart_project(angle_limit=66deg, island_margin=0.02)"
+    res = organic_unwrap_with_refinement(low, mg, baseline=baseline, thresholds=UVGateThresholds())
+    gate, m = res["gate"], res["metrics"]
+
+    with open(os.path.join(out_dir, "p5_uv_baseline.json"), "w", encoding="utf-8") as fh:
+        json.dump(base_report, fh, indent=2)
+    with open(os.path.join(out_dir, "p5_gate.json"), "w", encoding="utf-8") as fh:
+        json.dump({"strategy": strategy, "edge_over_30deg": round(frac, 4),
+                   "metrics": m, "gate": gate.to_dict(), "history": res["history"],
+                   "seam_count": len(res["seams"])}, fh, indent=2)
+
+    print(f"[P5] organic UV: strategy={strategy} islands={m['island_count']} "
+          f"overlap={m['overlap_ratio']:.5f} stretch={m['stretch_score']:.4f} "
+          f"vt/v={m['vt_v_ratio']:.4f} pack={m['packing_efficiency']:.4f} "
+          f"seams={len(res['seams'])} | gate={gate.verdict} "
+          f"hard_fail={[c.name for c in gate.hard_failures]} "
+          f"soft_fail={[c.name for c in gate.soft_failures]} "
+          f"fallback_used=False | {time.monotonic() - t:.1f}s", flush=True)
+
+    return {
+        "method": "organic",
+        "strategy": strategy,
+        "fallback_used": False,
+        "gate_verdict": gate.verdict,
+        "shippable": gate.passed,
+        "metrics": m,
+        "gate": gate.to_dict(),
+        "baseline": base_report,
+        "seam_count": len(res["seams"]),
+        "history": res["history"],
+    }
 
 
 def _activate_only(bpy, obj) -> None:
@@ -822,6 +994,11 @@ def run_p6_export(bpy, low, ref, out_dir: str, target_faces: int, reference_path
     # Fixed shared camera, framed on the reference (stable, same world space as low).
     renders = _render_fixed_camera(bpy, {"generated": low, "reference": ref}, ref, out_dir,
                                    tag=f"adaptive_t{target_faces}")
+    # Checker renders (UV_TRANSFER_PLAN calibration round): same checker (scale 40), same
+    # fixed camera, generated AND reference, front/side — so UV distortion/correspondence is
+    # visible side by side. Same auto-framing-forbidden rule (one shared camera).
+    checker_renders = _render_checker(bpy, {"generated": low, "reference": ref}, ref, out_dir,
+                                      tag=f"adaptive_t{target_faces}", scale=40.0)
 
     # Export OBJ with normals + UVs (v/vt/vn), then a .blend of the low-poly alone.
     _activate_only(bpy, low)
@@ -832,16 +1009,152 @@ def run_p6_export(bpy, low, ref, out_dir: str, target_faces: int, reference_path
     )
     bpy.ops.wm.save_as_mainfile(filepath=os.path.abspath(blend_path), copy=True)
 
+    uv_png = _export_uv_layout(bpy, low, os.path.join(out_dir, f"adaptive_t{target_faces}_uv.png"))
+    # Reference artist UV layout, for the side-by-side correspondence review (transfer
+    # engine deliverable, UV_TRANSFER_PLAN §6). Best-effort; skipped if the ref has no UVs.
+    ref_uv_png = None
+    if len(ref.data.uv_layers) > 0:
+        ref_uv_png = _export_uv_layout(bpy, ref, os.path.join(out_dir, f"adaptive_t{target_faces}_uv_reference.png"))
+    side_by_side_uv = _stitch_side_by_side(bpy, uv_png, ref_uv_png,
+                                           os.path.join(out_dir, f"adaptive_t{target_faces}_uv_sidebyside.png"))
+
     # Side-by-side counts vs the reference.
     table = {
         "generated": {"faces": len(low.data.polygons), "verts": len(low.data.vertices)},
         "reference": {"faces": len(ref.data.polygons), "verts": len(ref.data.vertices)},
     }
-    print(f"[P6] exported {obj_path} + {blend_path}; renders={list(renders)}; "
-          f"{time.monotonic() - t:.1f}s", flush=True)
+    print(f"[P6] exported {obj_path} + {blend_path}; uv_layout={uv_png}; "
+          f"renders={list(renders)}; {time.monotonic() - t:.1f}s", flush=True)
     print(f"[P6] side-by-side: generated {table['generated']} vs reference {table['reference']}",
           flush=True)
-    return {"obj": obj_path, "blend": blend_path, "renders": renders, "side_by_side": table}
+    return {"obj": obj_path, "blend": blend_path, "uv_layout": uv_png,
+            "uv_layout_reference": ref_uv_png, "uv_sidebyside": side_by_side_uv,
+            "renders": renders, "checker_renders": checker_renders, "side_by_side": table}
+
+
+def _apply_checker_uv(bpy, obj, *, scale: float = 40.0, name: str = "AI_Checker"):
+    """Attach an emission checker (procedural, no lights needed) mapped through the
+    object's ACTIVE UV layer, so a render shows UV stretch/correspondence directly. The
+    generated mesh maps through its transferred ``AI_UV`` layer; the reference through its
+    artist layer."""
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    nt.nodes.clear()
+    out = nt.nodes.new("ShaderNodeOutputMaterial")
+    emis = nt.nodes.new("ShaderNodeEmission")
+    chk = nt.nodes.new("ShaderNodeTexChecker")
+    chk.inputs["Scale"].default_value = float(scale)
+    uvn = nt.nodes.new("ShaderNodeUVMap")
+    active = obj.data.uv_layers.active
+    if active is not None:
+        uvn.uv_map = active.name
+    nt.links.new(uvn.outputs["UV"], chk.inputs["Vector"])
+    nt.links.new(chk.outputs["Color"], emis.inputs["Color"])
+    nt.links.new(emis.outputs["Emission"], out.inputs["Surface"])
+    obj.data.materials.clear()
+    obj.data.materials.append(mat)
+    return mat
+
+
+def _render_checker(bpy, objects: dict, frame_obj, out_dir: str, *, tag: str,
+                    scale: float = 40.0) -> dict:
+    """Checker render of each object from the SAME single fixed camera as the silhouettes
+    (auto-framing forbidden). Applies the scale-40 checker through each object's UV, renders
+    front + side per object. Returns {label_view_checker: path}."""
+    import mathutils
+
+    scene = bpy.context.scene
+    for eng in ("BLENDER_EEVEE_NEXT", "BLENDER_EEVEE"):
+        try:
+            scene.render.engine = eng
+            break
+        except (TypeError, ValueError):
+            continue
+    scene.render.resolution_x = scene.render.resolution_y = 700
+    for _, obj in objects.items():
+        _apply_checker_uv(bpy, obj, scale=scale)
+
+    corners = [frame_obj.matrix_world @ mathutils.Vector(c) for c in frame_obj.bound_box]
+    centre = sum(corners, mathutils.Vector()) / 8.0
+    radius = max((c - centre).length for c in corners) or 1.0
+    cam_data = bpy.data.cameras.new("AI_Checker_Cam")
+    cam_data.type = "ORTHO"
+    cam_data.ortho_scale = radius * 2.2
+    cam = bpy.data.objects.new("AI_Checker_Cam", cam_data)
+    bpy.context.collection.objects.link(cam)
+    scene.camera = cam
+
+    views = {"front": mathutils.Vector((0, -1, 0)), "side": mathutils.Vector((1, 0, 0))}
+    out: dict[str, str] = {}
+    all_objs = list(objects.values())
+    for label, obj in objects.items():
+        for other in all_objs:
+            other.hide_render = (other is not obj)
+        for vname, d in views.items():
+            cam.location = centre + d * radius * 3
+            cam.rotation_euler = (centre - cam.location).normalized().to_track_quat("-Z", "Z").to_euler()
+            path = os.path.join(out_dir, f"{tag}_{label}_{vname}_checker.png")
+            scene.render.filepath = path
+            bpy.ops.render.render(write_still=True)
+            out[f"{label}_{vname}_checker"] = path
+    for obj in all_objs:
+        obj.hide_render = False
+    bpy.data.objects.remove(cam, do_unlink=True)
+    bpy.data.cameras.remove(cam_data, do_unlink=True)
+    return out
+
+
+def _stitch_side_by_side(bpy, left_png, right_png, out_path):
+    """Composite two UV-layout PNGs horizontally (ours | reference) for the part-
+    correspondence review (UV_TRANSFER_PLAN §6). Best-effort via bpy image pixels +
+    numpy; returns the path or ``None`` if either input is missing/unloadable."""
+    if not left_png or not right_png or not os.path.exists(left_png) or not os.path.exists(right_png):
+        return None
+    import numpy as np
+    try:
+        li = bpy.data.images.load(os.path.abspath(left_png))
+        ri = bpy.data.images.load(os.path.abspath(right_png))
+        lw, lh = li.size
+        rw, rh = ri.size
+        la = np.array(li.pixels[:]).reshape(lh, lw, 4)
+        ra = np.array(ri.pixels[:]).reshape(rh, rw, 4)
+        h = max(lh, rh)
+        canvas = np.zeros((h, lw + rw, 4), dtype=np.float32)
+        canvas[:, :, 3] = 1.0
+        canvas[h - lh:, :lw] = la
+        canvas[h - rh:, lw:lw + rw] = ra
+        out = bpy.data.images.new("AI_UV_SideBySide", width=lw + rw, height=h, alpha=True)
+        out.pixels = canvas.reshape(-1).tolist()
+        out.filepath_raw = os.path.abspath(out_path)
+        out.file_format = "PNG"
+        out.save()
+        bpy.data.images.remove(li); bpy.data.images.remove(ri); bpy.data.images.remove(out)
+        return out_path
+    except (RuntimeError, ValueError, AttributeError) as exc:
+        print(f"[P6] uv side-by-side stitch skipped ({exc})", flush=True)
+        return None
+
+
+def _export_uv_layout(bpy, low, path: str) -> str | None:
+    """Write a UV-layout PNG of the active layer (plan §6 deliverable). Best-effort:
+    ``uv.export_layout`` needs an edit-mode UV selection."""
+    _activate_only(bpy, low)
+    try:
+        bpy.ops.object.mode_set(mode="EDIT")
+        bpy.ops.mesh.select_all(action="SELECT")
+        bpy.ops.uv.select_all(action="SELECT")
+        bpy.ops.uv.export_layout(filepath=os.path.abspath(path), mode="PNG",
+                                 size=(1024, 1024), opacity=1.0)
+    except (RuntimeError, AttributeError, TypeError) as exc:
+        print(f"[P6] uv layout export skipped ({exc})", flush=True)
+        path = None
+    finally:
+        try:
+            bpy.ops.object.mode_set(mode="OBJECT")
+        except RuntimeError:
+            pass
+    return path
 
 
 def _render_fixed_camera(bpy, objects: dict, frame_obj, out_dir: str, *, tag: str) -> dict:
@@ -930,10 +1243,15 @@ def _adaptive_markdown(report: dict) -> str:
         lines.append(f"- {flag} `{c['kind']}` **{c['name']}**: {c['detail']}")
     lines += [
         "",
-        "## P5 — UV",
-        f"- method: {p5.get('method')} (planner status: {p5.get('planner_status')}"
-        + (f", fallback: {p5.get('fallback')}" if p5.get('fallback') else "")
-        + f") | loop UVs: {p5.get('loop_uvs_written')} | seams: {p5.get('seam_edges')}",
+        "## P5 — UV (organic, Tracks 1+2)",
+        f"- method: {p5.get('method')} | strategy: {p5.get('strategy')} | "
+        f"fallback_used: {p5.get('fallback_used')} | shippable: {p5.get('shippable')}",
+        f"- islands: {(p5.get('metrics') or {}).get('island_count')} | "
+        f"overlap: {(p5.get('metrics') or {}).get('overlap_ratio')} | "
+        f"stretch: {(p5.get('metrics') or {}).get('stretch_score')} | "
+        f"vt/v: {(p5.get('metrics') or {}).get('vt_v_ratio')} | seams: {p5.get('seam_count')}",
+        f"- gate: {p5.get('gate_verdict')} | hard_fail: {(p5.get('gate') or {}).get('hard_failures')} "
+        f"| soft_fail: {(p5.get('gate') or {}).get('soft_failures')}",
         "",
         "## P6 — export",
         f"- OBJ: `{p6.get('obj')}` | blend: `{p6.get('blend')}`",
