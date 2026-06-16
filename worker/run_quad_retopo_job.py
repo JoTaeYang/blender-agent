@@ -143,6 +143,15 @@ def _as_bool(value, default: bool = False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _as_int(value, default=None):
+    if value is None:
+        return default
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 def _open_proxy(bpy, out_dir: str):
     """Resume path (plan §12.4): open ``proxy.blend`` and return the proxy object."""
     blend = os.path.join(out_dir, "proxy.blend")
@@ -506,9 +515,13 @@ def _run_adaptive_mode(bpy, opts: dict, target_faces: int) -> int:
     (gate-failed) ship — artifacts are written either way, never silently."""
     inp = opts.get("input", "sample/humanstatue.obj")
     reference = opts.get("reference", "sample/humanstatue_low.obj")
-    out_dir = opts.get("out", os.path.join("out", "adaptive_job"))
+    # ``--out-dir`` is an accepted alias for ``--out`` (the UV-plan docs use ``--out-dir``).
+    out_dir = opts.get("out") or opts.get("out_dir") or os.path.join("out", "adaptive_job")
     proxy_faces = int(opts.get("proxy_faces", 1_000_000))
     from_phase = opts.get("from_phase", "P1").upper()
+    # ``--p5-resume true`` is an accepted alias for ``--from-phase P5`` (UV-plan docs use it).
+    if _as_bool(opts.get("p5_resume"), False):
+        from_phase = "P5"
     os.makedirs(out_dir, exist_ok=True)
     if from_phase not in ADAPTIVE_PHASES:
         print(f"run_quad_retopo_job: unknown --from-phase {from_phase} for adaptive mode "
@@ -552,7 +565,18 @@ def _run_adaptive_mode(bpy, opts: dict, target_faces: int) -> int:
     print(f"[A4] freed proxy ({proxy_faces_now} faces) before UV/export", flush=True)
 
     # --- P5: auto-UV on the accepted (or best-effort) mesh.
-    p5 = run_p5_uv(bpy, low, ref, out_dir, engine=opts.get("uv_engine", "auto"))
+    p5 = run_p5_uv(bpy, low, ref, out_dir, engine=opts.get("uv_engine", "auto"),
+                   forbidden_edges=_parse_forbidden(opts), chapter_spec=_load_chapter_spec(opts),
+                   region_spec=_load_region_spec(opts),
+                   user_seam_spec=_load_user_seam_spec(opts),
+                   auto_refine_user_seams=_as_bool(opts.get("auto_refine_user_seams"), False),
+                   repair_user_seams=_as_bool(opts.get("repair_user_seams"), True),
+                   enforce_user_mandatory=_as_bool(opts.get("enforce_user_mandatory"), True),
+                   gate_user_mandatory=_as_bool(opts.get("gate_user_mandatory"), True),
+                   optimize_layout=_as_bool(opts.get("optimize_layout"), False),
+                   layout_opt_preset=opts.get("layout_opt_preset", "user_reference"),
+                   layout_opt_max_candidates=_as_int(opts.get("layout_opt_max_candidates")),
+                   segmentation_mode=opts.get("segmentation_mode"))
 
     # --- P6: export OBJ (v/vt/vn) + blend + fixed-camera side-by-side renders.
     p6 = run_p6_export(bpy, low, ref, out_dir, target_faces, reference)
@@ -603,7 +627,18 @@ def _run_adaptive_p5_resume(bpy, opts, target_faces, reference, out_dir, t0) -> 
     ref = next(o for o in bpy.data.objects if o not in before and o.type == "MESH")
     ref.name = "AI_Reference"
 
-    p5 = run_p5_uv(bpy, low, ref, out_dir, engine=opts.get("uv_engine", "auto"))
+    p5 = run_p5_uv(bpy, low, ref, out_dir, engine=opts.get("uv_engine", "auto"),
+                   forbidden_edges=_parse_forbidden(opts), chapter_spec=_load_chapter_spec(opts),
+                   region_spec=_load_region_spec(opts),
+                   user_seam_spec=_load_user_seam_spec(opts),
+                   auto_refine_user_seams=_as_bool(opts.get("auto_refine_user_seams"), False),
+                   repair_user_seams=_as_bool(opts.get("repair_user_seams"), True),
+                   enforce_user_mandatory=_as_bool(opts.get("enforce_user_mandatory"), True),
+                   gate_user_mandatory=_as_bool(opts.get("gate_user_mandatory"), True),
+                   optimize_layout=_as_bool(opts.get("optimize_layout"), False),
+                   layout_opt_preset=opts.get("layout_opt_preset", "user_reference"),
+                   layout_opt_max_candidates=_as_int(opts.get("layout_opt_max_candidates")),
+                   segmentation_mode=opts.get("segmentation_mode"))
     p6 = run_p6_export(bpy, low, ref, out_dir, target_faces, reference)
 
     report = {
@@ -820,20 +855,104 @@ def _uv_reference_baseline(bpy, ref):
     return baseline, {"artist": artist, "auto_unwrap": auto, "baseline": baseline.to_dict()}
 
 
-def run_p5_uv(bpy, low, ref, out_dir: str, *, engine: str = "auto") -> dict:
-    """Phase P5 — auto-UV. ``engine='transfer'`` (the new default when the reference has
-    UVs, UV_TRANSFER_PLAN) transfers the reference's chart LAYOUT onto the mesh — a
-    *semantically* artist-like result. ``engine='chart'`` is the no-reference geometric
-    chart engine; ``engine='organic'`` is the v1 cut-tree pelt. ``engine='auto'`` picks
-    transfer iff the reference carries UVs, else chart. None ships the Smart-UV fallback
-    (hard gate); the gate is reported honestly (best-effort on a hard-gate miss)."""
-    ref_has_uv = ref is not None and len(ref.data.uv_layers) > 0
+def _parse_forbidden(opts: dict) -> set:
+    """Parse ``--forbidden-edges "3054,1020"`` into a set of mesh edge ids the chart engine
+    must preserve (never route a UV cut through). Empty when unset."""
+    raw = opts.get("forbidden_edges", "")
+    if not raw or raw == "true":
+        return set()
+    return {int(x) for x in str(raw).replace(";", ",").split(",") if x.strip()}
+
+
+def _load_chapter_spec(opts: dict):
+    """Load the guided ``--chapter-spec <path>`` JSON file (GUIDED_UV_CHAPTER_PLAN) into a
+    dict, or return ``None`` when unset (the guided engine then uses an all-fallback spec)."""
+    path = opts.get("chapter_spec", "")
+    if not path or path == "true":
+        return None
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _load_region_spec(opts: dict):
+    """Load the ``--region-spec <path>`` JSON file (IMPORTANT_REGION_UV_POLICY_PLAN §5.6) into
+    a dict, or return ``None`` when unset. ``None`` (or ``enabled=false`` inside the file) means
+    the chart engine runs with IDENTICAL baseline behaviour — the region policy is optional."""
+    path = opts.get("region_spec", "")
+    if not path or path == "true":
+        return None
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _load_user_seam_spec(opts: dict):
+    """Load the ``--user-seam-spec <path>`` JSON file (USER_GUIDED_SEAM_UV_PIPELINE_PLAN §8.3)
+    into a :class:`~artist_uv_agent.user_seams.UserSeamSpec`, or return ``None`` when unset.
+    ``None`` means the chart engine runs with IDENTICAL baseline (auto chart) behaviour — the
+    user seam spec is opt-in (plan §12 success criterion #1)."""
+    path = opts.get("user_seam_spec", "")
+    if not path or path == "true":
+        return None
+    from artist_uv_agent.user_seams import load_user_seam_spec
+    return load_user_seam_spec(path)
+
+
+def run_p5_uv(bpy, low, ref, out_dir: str, *, engine: str = "auto", forbidden_edges=None,
+              chapter_spec=None, region_spec=None, segmentation_mode=None,
+              user_seam_spec=None, auto_refine_user_seams: bool = False,
+              repair_user_seams: bool = True, enforce_user_mandatory: bool = True,
+              gate_user_mandatory: bool = True, optimize_layout: bool = False,
+              layout_opt_preset: str = "user_reference",
+              layout_opt_max_candidates: int | None = None) -> dict:
+    """Phase P5 — auto-UV (GENERIC_UV_REVISION_PLAN §2 / §4.1).
+
+    Engine roles:
+
+    - ``auto`` (default): the GENERIC chart engine — geometry-driven chart
+      segmentation → SLIM unwrap → average island scale → CONCAVE pack → generic
+      gates + checker render. ``auto`` resolves to ``chart`` UNCONDITIONALLY, even
+      when the reference carries UVs: a general low-poly→UV tool must not inherit a
+      single reference's chart topology/slot assumptions (GENERIC_UV_REVISION_PLAN
+      §3.1). For the no-reference case the hard part is chart generation, not the
+      solver — that work lives in ``chart_uv_agent``.
+    - ``transfer``: EXPLICIT reference-assisted mode only. Projects chart ids from a
+      UV'd reference mesh that represents the SAME object in the SAME world space,
+      then unwraps with those seams. Never selected implicitly; fails loud without a
+      UV'd reference (never silently falls back to ``chart``).
+    - ``artist``: the artist-style no-reference engine (AUTO_ARTIST_UV_PLAN) — semantic
+      part segmentation → part classification → seam templates → SLIM → layout grammar →
+      density policy → hard + quality gate + artist report. Targets organic / statue-like
+      assets; NOT the default yet (plan §8). Emits ``artist_parts.json`` /
+      ``artist_layout.json`` + part-coloured debug overlays.
+    - ``guided``: the HYBRID guided-chapter engine (GUIDED_UV_CHAPTER_PLAN) — takes an
+      artist/agent ``chapter_spec`` (per-part UV chapter judgement, ``--chapter-spec
+      <path>``) and deterministically builds seams that respect it AND the hard gates
+      (mandatory ≥90° folds, no overlap, forbidden-edge preservation). Emits
+      ``guided_parts.json`` / ``guided_uv_report.json`` + part-coloured overlays.
+    - ``organic``: v1 cut-tree pelt — comparison / legacy mode only.
+
+    No engine ships the Smart-UV fallback (hard gate); the gate is reported honestly
+    (best-effort on a hard-gate miss)."""
     if engine == "auto":
-        engine = "transfer" if ref_has_uv else "chart"
+        engine = "chart"
     if engine == "transfer":
         return _run_p5_transfer(bpy, low, ref, out_dir)
+    if engine == "artist":
+        return _run_p5_artist(bpy, low, ref, out_dir)
+    if engine == "guided":
+        return _run_p5_guided(bpy, low, out_dir, chapter_spec=chapter_spec,
+                              forbidden_edges=forbidden_edges,
+                              segmentation_mode=segmentation_mode)
     if engine == "chart":
-        return _run_p5_chart(bpy, low, out_dir)
+        return _run_p5_chart(bpy, low, out_dir, forbidden_edges=forbidden_edges,
+                             region_spec=region_spec, user_seam_spec=user_seam_spec,
+                             auto_refine_user_seams=auto_refine_user_seams,
+                             repair_user_seams=repair_user_seams,
+                             enforce_user_mandatory=enforce_user_mandatory,
+                             gate_user_mandatory=gate_user_mandatory,
+                             optimize_layout=optimize_layout,
+                             layout_opt_preset=layout_opt_preset,
+                             layout_opt_max_candidates=layout_opt_max_candidates)
     return _run_p5_organic(bpy, low, ref, out_dir)
 
 
@@ -877,14 +996,63 @@ def _run_p5_transfer(bpy, low, ref, out_dir: str) -> dict:
     }
 
 
-def _run_p5_chart(bpy, low, out_dir: str) -> dict:
-    """Chart engine P5 (chart-UV plan §6–§8)."""
+def _g2(m, key) -> str:
+    """Format a metric for a one-line log (``n/a`` when absent)."""
+    v = (m or {}).get(key)
+    return f"{float(v):.4f}" if isinstance(v, (int, float)) else "n/a"
+
+
+def _run_p5_chart(bpy, low, out_dir: str, *, forbidden_edges=None, region_spec=None,
+                  user_seam_spec=None, auto_refine_user_seams: bool = False,
+                  repair_user_seams: bool = True, enforce_user_mandatory: bool = True,
+                  gate_user_mandatory: bool = True, optimize_layout: bool = False,
+                  layout_opt_preset: str = "user_reference",
+                  layout_opt_max_candidates: int | None = None) -> dict:
+    """Chart engine P5 (chart-UV plan §6–§8). When ``region_spec`` is supplied
+    (IMPORTANT_REGION_UV_POLICY_PLAN), an Important Region Policy protects artist-important
+    regions (face front, …) from low-angle smooth seams; ``None`` → identical baseline run.
+
+    When ``user_seam_spec`` is supplied (USER_GUIDED_SEAM_UV_PIPELINE_PLAN), the chart engine
+    runs in USER-GUIDED SEAM mode: the user's seam plan is authoritative, the auto chart solver
+    is bypassed, and the run is report-only (no auto seams unless ``auto_refine_user_seams``).
+    The user seam spec takes precedence over ``region_spec`` (both are auxiliary policies)."""
     from chart_uv_agent.pipeline import run_chart_uv
     from uv_agent.blender.extract import extract_mesh_graph
 
     t = time.monotonic()
     mg = extract_mesh_graph(low)
-    res = run_chart_uv(low, mg)
+    region_policy = None
+    if user_seam_spec is None and region_spec is not None:
+        from artist_uv_agent.region_policy import load_region_policy
+        region_policy = load_region_policy(region_spec, mg)
+        if region_policy is not None:
+            print(f"[P5] region policy: {len(region_policy.regions)} region(s) "
+                  f"{[(r.name, r.kind, len(r.face_ids), r.confidence) for r in region_policy.regions]} "
+                  f"protected_smooth_edges={len(region_policy.protected_smooth_edges)}", flush=True)
+    if user_seam_spec is not None:
+        from artist_uv_agent.user_seams import build_user_seam_set
+        usr = build_user_seam_set(mg, user_seam_spec)
+        print(f"[P5] user-seam mode: user_seams={len(usr.user_seam_edges)} "
+              f"protected={len(usr.user_protected_edges)} mandatory_90={len(usr.mandatory_edges)} "
+              f"conflicts={len(usr.conflicts)} invalid={len(usr.invalid_edges)} "
+              f"auto_refine={auto_refine_user_seams} repair={repair_user_seams} "
+              f"enforce_mandatory={enforce_user_mandatory} gate_mandatory={gate_user_mandatory}",
+              flush=True)
+    layout_optimization_config = None
+    if optimize_layout:
+        from chart_uv_agent.layout_optimization import make_config
+        layout_optimization_config = make_config(
+            layout_opt_preset, max_candidates=layout_opt_max_candidates, enabled=True)
+        print(f"[P5] layout optimization: preset={layout_opt_preset} "
+              f"max_candidates={layout_optimization_config.max_candidates}", flush=True)
+    res = run_chart_uv(low, mg, forbidden_edges=forbidden_edges, region_policy=region_policy,
+                       user_seam_spec=user_seam_spec,
+                       auto_refine_user_seams=auto_refine_user_seams,
+                       repair_user_seams=repair_user_seams,
+                       enforce_user_mandatory=enforce_user_mandatory,
+                       gate_user_mandatory=gate_user_mandatory,
+                       optimize_layout=optimize_layout,
+                       layout_optimization_config=layout_optimization_config)
     gate, m = res["gate"], res["metrics"]
     stuck = res["stuck_charts"]
     shippable = res["shippable"]  # gate.passed OR only convexity_p10 fails with stuck (§5c)
@@ -892,9 +1060,52 @@ def _run_p5_chart(bpy, low, out_dir: str) -> dict:
     pre = res.get("metrics_before_correctness", {})
     with open(os.path.join(out_dir, "p5_gate.json"), "w", encoding="utf-8") as fh:
         json.dump({"engine": "chart", "chart_count": res["chart_count"], "metrics": m,
-                   "gate": gate.to_dict(), "shippable": shippable, "stuck_charts": stuck,
+                   "gate": gate.to_dict(), "gate_config": res.get("gate_config"),
+                   "mode": res.get("mode"), "user_seams": res.get("user_seams"),
+                   "shippable": shippable, "stuck_charts": stuck,
+                   "distortion": res.get("distortion"), "conclusion": res.get("conclusion"),
+                   "mandatory_90_edges": res.get("mandatory_90_edges"),
+                   "mandatory_90_missing": res.get("mandatory_90_missing"),
+                   "mandatory_90_fold_edges": res.get("mandatory_90_fold_edges"),
+                   "mandatory_90_uv_unsplit": res.get("mandatory_90_uv_unsplit"),
+                   "initial_island_count": res.get("initial_island_count"),
+                   "final_island_count": res.get("final_island_count"),
+                   "seam_type_counts": res.get("seam_type_counts"),
+                   "pruned_auxiliary": res.get("pruned_auxiliary"),
+                   "forbidden_edges": res.get("forbidden_edges"),
+                   "forbidden_stripped": res.get("forbidden_stripped"),
                    "metrics_before_correctness": pre, "correctness_history": res.get("correctness"),
-                   "history": res["history"], "seam_count": len(res["seams"])}, fh, indent=2)
+                   "layout_optimization": res.get("layout_optimization"),
+                   "history": res["history"], "seam_count": len(res["seams"]),
+                   "seams": res.get("seams")}, fh, indent=2)
+
+    # Minimal app artefact (RULE_BASED_UV_SEAM_CORE_PLAN §5.3/§8): the reviewer-facing seam
+    # report (why each cut, distortion before/after, conflicts). Built in run_chart_uv.
+    seam_report = res.get("seam_report")
+    if seam_report is not None:
+        with open(os.path.join(out_dir, "seam_report.json"), "w", encoding="utf-8") as fh:
+            json.dump(seam_report, fh, indent=2)
+
+    # Important Region Policy artefact (IMPORTANT_REGION_UV_POLICY_PLAN §5.5/§7): the per-region
+    # mandatory-vs-smooth seam breakdown + rejected protected splits. Also embedded in
+    # seam_report.regions; emitted standalone for the app overlay. Absent → baseline run.
+    region_report = res.get("region_report")
+    if region_report is not None:
+        audit = res.get("region_audit", {})
+        with open(os.path.join(out_dir, "region_report.json"), "w", encoding="utf-8") as fh:
+            json.dump({"mode": res.get("region_mode"),
+                       "protected_merges": res.get("region_protected_merges"),
+                       "audit": audit, "regions": region_report}, fh, indent=2)
+        print(f"[P5] region policy mode={res.get('region_mode')} "
+              f"protected_merges={res.get('region_protected_merges')} "
+              f"face_front_core_smooth={audit.get('face_front_core_smooth_seams')} "
+              f"face_smooth_total={audit.get('face_smooth_seams')}", flush=True)
+        for r in region_report:
+            print(f"[P5] region '{r['name']}' ({r['kind']}, {r['detection']}/{r['confidence']}): "
+                  f"faces={r['face_count']} smooth_seams={r['smooth_seams_in_region']} "
+                  f"mandatory_seams={r['mandatory_seams_in_region']} "
+                  f"merges={r.get('protected_merges', 0)} "
+                  f"rejected_splits={r['rejected_splits']} -> {r['status']}", flush=True)
 
     print(f"[P5] correctness round (raster overlap): "
           f"before raster={pre.get('raster_overlap_ratio')} charts={pre.get('island_count')} "
@@ -903,11 +1114,26 @@ def _run_p5_chart(bpy, low, out_dir: str) -> dict:
           flush=True)
 
     print(f"[P5] chart UV: charts={m['island_count']} stretch={m['stretch_score']:.4f} "
+          f"checker_distortion={m.get('checker_distortion_score')} "
+          f"worst_island={m.get('worst_island_id')}@{m.get('worst_island_distortion')} "
+          f"mandatory_90_missing={m.get('mandatory_90_missing')} "
+          f"mandatory_90_uv_unsplit={m.get('mandatory_90_uv_unsplit')} "
           f"overlap={m['overlap_ratio']:.5f} raster_overlap={m.get('raster_overlap_ratio')} "
           f"packing={m['packing_efficiency']:.4f} convex_p10={m.get('convexity_p10')} "
           f"small={m['small_island_ratio']:.3f} | gate={gate.verdict} "
-          f"fails={[c.name for c in gate.failures]} shippable={shippable} "
-          f"stuck={len(stuck)} | {time.monotonic() - t:.1f}s", flush=True)
+          f"fails={[c.name for c in gate.failures]} advisories={[c.name for c in gate.advisories]} "
+          f"shippable={shippable} stuck={len(stuck)} | {time.monotonic() - t:.1f}s", flush=True)
+    lo = res.get("layout_optimization")
+    if lo:
+        print(f"[P5] layout optimization: selected={lo['selected_candidate_id']} "
+              f"kept_baseline={lo['kept_baseline']} candidates={len(lo['candidates'])} "
+              f"score {lo['score_before']:.4f} -> {lo['score_after']:.4f} | "
+              f"packing {_g2(lo['before_metrics'], 'packing_efficiency')} -> "
+              f"{_g2(lo['after_metrics'], 'packing_efficiency')} | "
+              f"stretch {_g2(lo['before_metrics'], 'stretch_score')} -> "
+              f"{_g2(lo['after_metrics'], 'stretch_score')}", flush=True)
+    if res.get("conclusion"):
+        print(f"[P5] {res['conclusion']}", flush=True)
     if stuck:
         print(f"[P5] U1.7 stuck charts ({len(stuck)}, §5c last round, shipped): "
               f"{[(s['size'], s['convexity']) for s in stuck[:6]]}", flush=True)
@@ -916,7 +1142,292 @@ def _run_p5_chart(bpy, low, out_dir: str) -> dict:
         "gate_verdict": gate.verdict, "shippable": shippable, "stuck_charts": stuck,
         "metrics": m, "gate": gate.to_dict(), "seam_count": len(res["seams"]),
         "chart_count": res["chart_count"], "history": res["history"],
+        "region_report": res.get("region_report"),
     }
+
+
+def _run_p5_artist(bpy, low, ref, out_dir: str) -> dict:
+    """Artist-style no-reference P5 (AUTO_ARTIST_UV_PLAN §5/§8). Segments the mesh into
+    semantic parts, classifies them, builds seam templates, SLIM-unwraps, applies the
+    layout grammar, and writes the hard+quality gate, ``artist_parts.json`` /
+    ``artist_layout.json``, and the part-coloured debug overlays (plan §7, mandatory).
+    Never ships the Smart-UV fallback (hard gate)."""
+    from artist_uv_agent.pipeline import run_artist_uv
+    from uv_agent.blender.extract import extract_mesh_graph
+
+    t = time.monotonic()
+    mg = extract_mesh_graph(low)
+    res = run_artist_uv(low, mg)
+    gate, m, rep = res["gate"], res["metrics"], res["report"]
+    shippable = res["shippable"]
+
+    with open(os.path.join(out_dir, "p5_gate.json"), "w", encoding="utf-8") as fh:
+        json.dump({"engine": "artist", "part_count": res["part_count"],
+                   "chart_count": res["chart_count"], "metrics": m,
+                   "gate": gate.to_dict(), "gate_config": res["gate_config"],
+                   "shippable": shippable, "report": rep,
+                   "orientation_applied": res["orientation_applied"]}, fh, indent=2)
+    with open(os.path.join(out_dir, "artist_parts.json"), "w", encoding="utf-8") as fh:
+        json.dump(res["parts_json"], fh, indent=2)
+    with open(os.path.join(out_dir, "artist_layout.json"), "w", encoding="utf-8") as fh:
+        json.dump(res["layout_json"], fh, indent=2)
+
+    overlays = _artist_debug_overlays(bpy, low, mg, res, out_dir)
+
+    qf = [c.name for c in gate.quality_failures]
+    hf = [c.name for c in gate.hard_failures]
+    print(f"[P5] artist UV: parts={res['part_count']} charts={res['chart_count']} "
+          f"types={rep.get('part_type_histogram')} stretch={m['stretch_score']:.4f} "
+          f"raster_overlap={m['raster_overlap_ratio']} packing={m['packing_efficiency']:.3f} "
+          f"texel_var={m['texel_density_variance']:.5f} orient_consistency={rep.get('orientation_consistency')} "
+          f"| gate={gate.verdict} hard_fail={hf} quality_fail={qf} shippable={shippable} "
+          f"orient_applied={res['orientation_applied']} | {time.monotonic() - t:.1f}s", flush=True)
+    return {
+        "method": "artist", "engine": "artist", "fallback_used": False,
+        "gate_verdict": gate.verdict, "shippable": shippable,
+        "metrics": m, "gate": gate.to_dict(), "report": rep,
+        "part_count": res["part_count"], "chart_count": res["chart_count"],
+        "seam_count": len(res["seams"]), "overlays": overlays,
+        "orientation_applied": res["orientation_applied"],
+    }
+
+
+def _run_p5_guided(bpy, low, out_dir: str, *, chapter_spec=None, forbidden_edges=None,
+                   segmentation_mode=None) -> dict:
+    """Guided-chapter hybrid P5 (GUIDED_UV_CHAPTER_PLAN). Takes an artist/agent chapter spec
+    (a :class:`GuidedUVSpec`, a dict, a JSON string, or — via ``--chapter-spec`` — a path to
+    a JSON file) and deterministically builds seams that respect the spec AND the hard gates.
+    Falls back to an empty spec (every part → class-based fallback chapter) when none given,
+    so it always produces a layout. Forbidden edges (e.g. ``--forbidden-edges 3054``) are
+    preserved end-to-end and merged into the spec's own forbidden set. ``--segmentation-mode``
+    (auto|coarse|full|manual_parts) overrides the spec's; ``auto`` uses the fast coarse
+    connected-component path when no chapter fills ``source_part_ids``."""
+    from artist_uv_agent.guided import GuidedUVSpec, run_guided_uv
+    from uv_agent.blender.extract import extract_mesh_graph
+
+    t = time.monotonic()
+    mg = extract_mesh_graph(low)
+    spec = GuidedUVSpec.coerce(chapter_spec) if chapter_spec is not None else GuidedUVSpec()
+    # Merge CLI --forbidden-edges into the spec's forbidden set (union, deduped).
+    if forbidden_edges:
+        spec.forbidden_edges = sorted(set(spec.forbidden_edges) | set(forbidden_edges))
+
+    res = run_guided_uv(low, mg, spec, segmentation_mode=segmentation_mode)
+    gate, m, rep = res["gate"], res["metrics"], res["report"]
+    shippable = res["shippable"]
+
+    with open(os.path.join(out_dir, "p5_gate.json"), "w", encoding="utf-8") as fh:
+        json.dump({"engine": "guided", "part_count": res["part_count"],
+                   "chapter_count": res["chapter_count"], "chart_count": res["chart_count"],
+                   # Top-level completion fields (work plan §8 주의): UV-technical vs
+                   # guided-judgement success, never conflated.
+                   "uv_shippable": res["uv_shippable"], "guided_complete": res["guided_complete"],
+                   "completion_status": res["completion_status"],
+                   "artist_intent_passed": res["artist_intent_passed"],
+                   "unmet_artist_intents": res["unmet_artist_intents"],
+                   "metrics": m, "gate": gate.to_dict(), "gate_config": res["gate_config"],
+                   "shippable": shippable, "report": rep,
+                   "forbidden_edges": res["forbidden_edges"],
+                   "forbidden_stripped": res["forbidden_stripped"],
+                   "forbidden_conflicts": res["forbidden_conflicts"],
+                   "seam_type_counts": res["seam_type_counts"],
+                   "pruned_auxiliary": res["pruned_auxiliary"],
+                   "seam_count": len(res["seams"]), "seams": res["seams"]}, fh, indent=2)
+    with open(os.path.join(out_dir, "guided_parts.json"), "w", encoding="utf-8") as fh:
+        json.dump(res["parts_json"], fh, indent=2)
+    with open(os.path.join(out_dir, "guided_uv_report.json"), "w", encoding="utf-8") as fh:
+        json.dump(rep, fh, indent=2)
+
+    overlays = _guided_debug_overlays(bpy, low, mg, res, out_dir)
+
+    cov = rep.get("coverage", {})
+    pol = rep.get("policy_reflection", {})
+    print(f"[P5] guided UV: parts={res['part_count']} chapters={res['chapter_count']} "
+          f"(spec={rep.get('spec_chapter_count')}, fallback={rep.get('fallback_chapter_count')}) "
+          f"uv_shippable={res.get('uv_shippable')} guided_complete={res.get('guided_complete')} "
+          f"completion={res.get('completion_status')} "
+          f"artist_intent_passed={res.get('artist_intent_passed')} "
+          f"unmet={res.get('unmet_artist_intents')} "
+          f"intent_applied={rep.get('guided_intent_applied')} "
+          f"policy_reflected={rep.get('guided_policy_reflected')} "
+          f"fallback_face_ratio={cov.get('fallback_face_ratio')} "
+          f"cylinder_policy={pol.get('cylinder_policy_chapter_count')} "
+          f"templates_applied={pol.get('template_policy_applied_count')} "
+          f"template_seams={pol.get('chapter_template_seam_count')} "
+          f"unreflected={pol.get('unreflected_policy_chapters')} "
+          f"front_preserve={pol.get('front_preserve_protection')}/{pol.get('front_preserve_edge_count')} "
+          f"charts={res['chart_count']} stretch={m['stretch_score']:.4f} "
+          f"mandatory_90_missing={m.get('mandatory_90_missing')} "
+          f"mandatory_90_uv_unsplit={m.get('mandatory_90_uv_unsplit')} "
+          f"raster_overlap={m.get('raster_overlap_ratio')} packing={m['packing_efficiency']:.3f} "
+          f"forbidden={res['forbidden_edges']} stripped={res['forbidden_stripped']} "
+          f"conflicts={res['forbidden_conflicts']} seam_types={res['seam_type_counts']} "
+          f"| gate={gate.verdict} fails={[c.name for c in gate.failures]} "
+          f"shippable={shippable} | {time.monotonic() - t:.1f}s", flush=True)
+    for w in rep.get("warnings", []):
+        print(f"[P5] guided WARN: {w}", flush=True)
+    return {
+        "method": "guided", "engine": "guided", "fallback_used": False,
+        "gate_verdict": gate.verdict, "shippable": shippable,
+        "metrics": m, "gate": gate.to_dict(), "report": rep,
+        "part_count": res["part_count"], "chapter_count": res["chapter_count"],
+        "chart_count": res["chart_count"], "seam_count": len(res["seams"]),
+        "overlays": overlays,
+    }
+
+
+def _guided_debug_overlays(bpy, low, mg, res, out_dir: str) -> dict:
+    """Write the chapter-coloured UV overlays (PNG + SVG) — the guided analogue of the
+    artist part overlays, coloured by chapter index. Best-effort and reported."""
+    from artist_uv_agent.debug import parts_uv_svg, rasterize_parts
+    from chart_uv_agent.unwrap import read_uvmap
+
+    out: dict = {}
+    # Final (post-repair/prune) chart→chapter map, recomputed from the shipped seams — never
+    # the stale build-time map (the repair loop can split/merge charts).
+    chart_to_chapter = res["chart_to_chapter"]
+    charts = res["charts"]
+    uvmap = read_uvmap(low, mg)
+    try:
+        png = os.path.join(out_dir, "guided_uv_colored_by_chapter.png")
+        _save_rgba_png(bpy, rasterize_parts(mg, uvmap, chart_to_chapter, charts, resolution=512),
+                       "guided_uv_by_chapter", png)
+        out["png"] = png
+    except Exception as exc:  # noqa: BLE001
+        print(f"[P5] guided chapter PNG skipped ({exc})", flush=True)
+    try:
+        svg = os.path.join(out_dir, "guided_uv_colored_by_chapter.svg")
+        with open(svg, "w", encoding="utf-8") as fh:
+            fh.write(parts_uv_svg(mg, uvmap, chart_to_chapter, charts))
+        out["svg"] = svg
+    except Exception as exc:  # noqa: BLE001
+        print(f"[P5] guided chapter SVG skipped ({exc})", flush=True)
+    return out
+
+
+def _save_rgba_png(bpy, arr, name: str, path: str) -> str:
+    """Save an ``(h, w, 4)`` float RGBA numpy raster (row 0 = bottom, Blender convention)
+    as a PNG via the Blender image API — the same path P6 uses for stitched previews."""
+    h, w = arr.shape[0], arr.shape[1]
+    img = bpy.data.images.new(name, width=w, height=h, alpha=True)
+    img.pixels = arr.reshape(-1).tolist()
+    img.filepath_raw = os.path.abspath(path)
+    img.file_format = "PNG"
+    img.save()
+    bpy.data.images.remove(img)
+    return path
+
+
+def _artist_debug_overlays(bpy, low, mg, res, out_dir: str) -> dict:
+    """Write the mandatory part-review overlays (plan §7/§12): the UV coloured by part
+    (PNG + SVG) and the 3D part-debug renders (front/side, on a throwaway duplicate so the
+    low mesh / P6 export is untouched). Each is best-effort and reported."""
+    from artist_uv_agent.debug import parts_uv_svg, rasterize_parts
+    from chart_uv_agent.unwrap import read_uvmap
+
+    out: dict = {}
+    seam = res["seam_result"]
+    charts = res["charts"]
+    uvmap = read_uvmap(low, mg)
+
+    try:
+        png = os.path.join(out_dir, "artist_uv_colored_by_part.png")
+        _save_rgba_png(bpy, rasterize_parts(mg, uvmap, seam.chart_to_part, charts, resolution=512),
+                       "AI_Artist_Parts", png)
+        out["uv_colored_by_part"] = png
+    except (RuntimeError, ValueError, AttributeError) as exc:
+        print(f"[P5] artist part PNG skipped ({exc})", flush=True)
+    try:
+        svg = os.path.join(out_dir, "artist_uv_colored_by_part.svg")
+        with open(svg, "w", encoding="utf-8") as fh:
+            fh.write(parts_uv_svg(mg, uvmap, seam.chart_to_part, charts))
+        out["uv_colored_by_part_svg"] = svg
+    except (OSError, ValueError) as exc:
+        print(f"[P5] artist part SVG skipped ({exc})", flush=True)
+    try:
+        out.update(_render_part_debug(bpy, low, mg, seam, out_dir))
+    except (RuntimeError, ValueError, AttributeError) as exc:
+        print(f"[P5] artist 3D part debug render skipped ({exc})", flush=True)
+    return out
+
+
+def _render_part_debug(bpy, low, mg, seam, out_dir: str) -> dict:
+    """Front/side renders of the mesh with each semantic part flat-shaded its own colour,
+    on a DUPLICATE object (the low mesh / P6 export stay untouched). Drives an EMISSION
+    material from a per-corner colour attribute and renders with EEVEE — the same
+    light-free node-material path P6's checker uses (Workbench per-material/vertex colour is
+    unreliable headless on Blender 5)."""
+    import mathutils
+
+    from artist_uv_agent.debug import part_color
+
+    dup = low.copy()
+    dup.data = low.data.copy()
+    dup.name = "AI_Artist_PartDebug"
+    bpy.context.collection.objects.link(dup)
+    try:
+        face_part = {f: seam.chart_to_part[cid]
+                     for cid, fs in enumerate(seam_charts(mg, seam)) for f in fs}
+        ca = dup.data.color_attributes.new(name="part_debug", type="FLOAT_COLOR", domain="CORNER")
+        default = face_part.get(0, 0)
+        for poly in dup.data.polygons:
+            r, g, b = part_color(face_part.get(poly.index, default))
+            for li in poly.loop_indices:
+                ca.data[li].color = (r, g, b, 1.0)
+        dup.data.update()
+
+        mat = bpy.data.materials.new("AI_PartDebug")
+        mat.use_nodes = True
+        nt = mat.node_tree
+        nt.nodes.clear()
+        out_n = nt.nodes.new("ShaderNodeOutputMaterial")
+        emis = nt.nodes.new("ShaderNodeEmission")
+        attr = nt.nodes.new("ShaderNodeAttribute")
+        attr.attribute_name = "part_debug"
+        nt.links.new(attr.outputs["Color"], emis.inputs["Color"])
+        nt.links.new(emis.outputs["Emission"], out_n.inputs["Surface"])
+        dup.data.materials.clear()
+        dup.data.materials.append(mat)
+
+        scene = bpy.context.scene
+        for eng in ("BLENDER_EEVEE_NEXT", "BLENDER_EEVEE"):
+            try:
+                scene.render.engine = eng
+                break
+            except (TypeError, ValueError):
+                continue
+        scene.render.resolution_x = scene.render.resolution_y = 700
+        corners = [dup.matrix_world @ mathutils.Vector(c) for c in dup.bound_box]
+        centre = sum(corners, mathutils.Vector()) / 8.0
+        radius = max((c - centre).length for c in corners) or 1.0
+        cam_data = bpy.data.cameras.new("AI_PartDebug_Cam")
+        cam_data.type = "ORTHO"
+        cam_data.ortho_scale = radius * 2.2
+        cam = bpy.data.objects.new("AI_PartDebug_Cam", cam_data)
+        bpy.context.collection.objects.link(cam)
+        scene.camera = cam
+        views = {"front": mathutils.Vector((0, -1, 0)), "side": mathutils.Vector((1, 0, 0))}
+        out: dict = {}
+        try:
+            for vname, d in views.items():
+                cam.location = centre + d * radius * 3
+                cam.rotation_euler = (centre - cam.location).normalized().to_track_quat("-Z", "Z").to_euler()
+                path = os.path.join(out_dir, f"artist_part_debug_{vname}.png")
+                scene.render.filepath = path
+                bpy.ops.render.render(write_still=True)
+                out[f"part_debug_{vname}"] = path
+        finally:
+            bpy.data.objects.remove(cam, do_unlink=True)
+            bpy.data.cameras.remove(cam_data, do_unlink=True)
+        return out
+    finally:
+        _remove_object_w(bpy, dup)
+
+
+def seam_charts(mg, seam):
+    """Re-flood the artist charts from the seam set (worker-local helper for part-debug)."""
+    from chart_uv_agent.segmentation import flood_charts
+    return flood_charts(mg, seam.seams)
 
 
 def _run_p5_organic(bpy, low, ref, out_dir: str) -> dict:
@@ -1010,8 +1521,9 @@ def run_p6_export(bpy, low, ref, out_dir: str, target_faces: int, reference_path
     bpy.ops.wm.save_as_mainfile(filepath=os.path.abspath(blend_path), copy=True)
 
     uv_png = _export_uv_layout(bpy, low, os.path.join(out_dir, f"adaptive_t{target_faces}_uv.png"))
-    # Reference artist UV layout, for the side-by-side correspondence review (transfer
-    # engine deliverable, UV_TRANSFER_PLAN §6). Best-effort; skipped if the ref has no UVs.
+    # Reference artist UV layout — DIAGNOSTIC ONLY (GENERIC_UV_REVISION_PLAN §4.5).
+    # The generic acceptance target is the generated layout + checker renders + gate,
+    # NOT resemblance to this reference. Best-effort; skipped if the ref has no UVs.
     ref_uv_png = None
     if len(ref.data.uv_layers) > 0:
         ref_uv_png = _export_uv_layout(bpy, ref, os.path.join(out_dir, f"adaptive_t{target_faces}_uv_reference.png"))
@@ -1028,8 +1540,10 @@ def run_p6_export(bpy, low, ref, out_dir: str, target_faces: int, reference_path
     print(f"[P6] side-by-side: generated {table['generated']} vs reference {table['reference']}",
           flush=True)
     return {"obj": obj_path, "blend": blend_path, "uv_layout": uv_png,
-            "uv_layout_reference": ref_uv_png, "uv_sidebyside": side_by_side_uv,
-            "renders": renders, "checker_renders": checker_renders, "side_by_side": table}
+            "renders": renders, "checker_renders": checker_renders, "side_by_side": table,
+            # Diagnostic-only reference comparison artifacts (GENERIC_UV_REVISION_PLAN §4.5):
+            # present iff a UV'd reference exists; NOT the generic acceptance target.
+            "uv_layout_reference": ref_uv_png, "uv_sidebyside": side_by_side_uv}
 
 
 def _apply_checker_uv(bpy, obj, *, scale: float = 40.0, name: str = "AI_Checker"):

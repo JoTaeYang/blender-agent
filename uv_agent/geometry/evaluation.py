@@ -396,6 +396,46 @@ def uv_islands_from_uvmap(mesh: MeshGraph, uvmap: UVMap, *, tol: float = 1e-5) -
     return islands
 
 
+def mandatory_seam_uv_audit(mesh: MeshGraph, uvmap: UVMap, *, fold_angle: float = 90.0,
+                            tol: float = 1e-5) -> dict:
+    """UV-based R2 audit (MINIMAL_DISTORTION_UV_PLAN §M2). The seam-SET audit is a false
+    positive: an edge can be in the seam set yet still carry the SAME UV on both sides in
+    the final layout (an interior 'slit' seam Blender welds across, or a fold buried by a
+    later merge). This checks the ACTUAL ``uvmap``: for every 2-face edge bending ≥
+    ``fold_angle``, do the two faces have DIFFERENT UVs at BOTH shared vertices? An edge
+    whose two faces are welded is a real checker smear across a hard crease — hard-gated.
+
+    Returns ``mandatory_90_fold_edges`` (the 2-face folds checked), ``mandatory_90_uv_unsplit``
+    (welded ones), and ``uv_unsplit_edge_ids``. Boundary/non-manifold edges have one face,
+    so they are inherently UV boundaries and are not counted here."""
+    fv_uv: dict[tuple[int, int], tuple[float, float]] = {}
+    for loop in mesh.loops:
+        fv_uv[(loop.face_id, loop.vertex_id)] = uvmap.get(loop.index)
+
+    def welded(fa: int, fb: int, verts) -> bool:
+        for vid in verts:
+            ua = fv_uv.get((fa, vid))
+            ub = fv_uv.get((fb, vid))
+            if ua is None or ub is None:
+                return False
+            if abs(ua[0] - ub[0]) > tol or abs(ua[1] - ub[1]) > tol:
+                return False
+        return True
+
+    folds = 0
+    unsplit: list[int] = []
+    for e in mesh.edges:
+        if len(e.face_ids) != 2 or e.dihedral_angle < fold_angle:
+            continue
+        folds += 1
+        fa, fb = e.face_ids
+        if welded(fa, fb, e.vertex_ids):
+            unsplit.append(e.id)
+    return {"mandatory_90_fold_edges": folds,
+            "mandatory_90_uv_unsplit": len(unsplit),
+            "uv_unsplit_edge_ids": unsplit}
+
+
 def boundary_straightness_score(mesh: MeshGraph, seam_edge_ids) -> dict:
     """Jaggedness of the chart boundaries (chart-UV plan U0 / U1.5, report-only).
 
@@ -468,6 +508,45 @@ def per_island_metrics(mesh: MeshGraph, face_ids: list[int], uvmap: UVMap) -> di
         acc += abs(math.log(ratio)) * a3
     stretch = (acc / area3d_total) if area3d_total > 1e-12 else 0.0
     return {"overlap_ratio": round(overlap, 6), "stretch_score": round(stretch, 6)}
+
+
+def island_distortion_summary(mesh: MeshGraph, uvmap: UVMap, islands) -> list[dict]:
+    """Per-island checker/stretch distortion summary (RULE_BASED_UV_SEAM_CORE_PLAN §6.3).
+
+    ``islands`` is a list of face-id lists (e.g. ``flood_charts`` output). For each island
+    return its 3D area, UV area, **area-weighted mean per-face stretch** (== the checker
+    distortion the pipeline gates per island — same metric as ``_chart_distortion``), the
+    fold/overlap ratio, and a 0-based ``rank`` by distortion (0 = worst). The reviewer reads
+    this to see *which* island a refinement seam should target, not just the global mean.
+
+    Pure: one shared :func:`per_face_stretch` pass drives every island, so the numbers tie
+    exactly to the pipeline's worst-island pick and to ``_distortion_report``."""
+    fstr = per_face_stretch(mesh, uvmap)
+    rows: list[dict] = []
+    for cid, face_ids in enumerate(islands):
+        area3d = sum(mesh.faces[f].area_3d for f in face_ids)
+        area_uv = 0.0
+        flipped = 0.0
+        for fid in face_ids:
+            for l0, l1, l2 in _tris_from_face(mesh.faces[fid].loop_indices):
+                s = _tri_signed_area_uv(uvmap.get(l0), uvmap.get(l1), uvmap.get(l2))
+                area_uv += abs(s)
+                if s < 0:
+                    flipped += abs(s)
+        distortion = (sum(fstr[f] * mesh.faces[f].area_3d for f in face_ids) / area3d
+                      if area3d > 1e-12 else 0.0)
+        rows.append({
+            "island_id": cid,
+            "face_count": len(face_ids),
+            "area_3d": round(float(area3d), 6),
+            "area_uv": round(float(area_uv), 6),
+            "distortion": round(float(distortion), 6),
+            "overlap_ratio": round((flipped / area_uv) if area_uv > 1e-12 else 0.0, 6),
+        })
+    # 0-based rank by distortion (worst first) — stable on ties via island id.
+    for rank, row in enumerate(sorted(rows, key=lambda r: (-r["distortion"], r["island_id"]))):
+        row["rank"] = rank
+    return rows
 
 
 def _seam_visibility(mesh: MeshGraph, plan: IslandPlan, view_dir) -> float:

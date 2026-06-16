@@ -68,6 +68,236 @@ def mandatory_seam_edges(mesh: MeshGraph, *, fold_angle: float = FOLD_ANGLE) -> 
     }
 
 
+def mandatory_seam_audit(mesh: MeshGraph, seams: set[int], *,
+                         fold_angle: float = FOLD_ANGLE) -> dict:
+    """R2 audit (MINIMAL_DISTORTION_UV_PLAN §M2): prove every ≥ ``fold_angle`` model fold
+    (plus boundary/non-manifold edges) is present in ``seams``. The hard gate is
+    ``mandatory_90_missing == 0`` — a 90°+ crease that is NOT a seam would smear the
+    checker across a hard edge, which the user forbids. Returns the required/missing
+    counts and the offending edge ids (pure; safe to call on the final seam set)."""
+    required = mandatory_seam_edges(mesh, fold_angle=fold_angle)
+    missing = sorted(required - set(seams))
+    return {"mandatory_90_edges": len(required),
+            "mandatory_90_missing": len(missing),
+            "missing_edge_ids": missing}
+
+
+def interior_fold_edges(mesh: MeshGraph, seams: set[int], *,
+                        fold_angle: float = FOLD_ANGLE) -> list[int]:
+    """Mandatory fold edges (≥ ``fold_angle``, 2-face) whose two faces land in the SAME
+    flood-chart — an interior 'slit' seam. Blender welds the UV across such a non-separating
+    seam, smearing the checker over a hard crease, so it must be turned into a real chart
+    boundary (MINIMAL_DISTORTION_UV_PLAN §M2). These arise when a lone crease doesn't reach
+    the chart boundary, or when a merge/absorb buried a fold inside a chart."""
+    charts = flood_charts(mesh, seams)
+    face_chart = {f: cid for cid, fs in enumerate(charts) for f in fs}
+    out: list[int] = []
+    for e in mesh.edges:
+        if len(e.face_ids) != 2 or e.dihedral_angle < fold_angle:
+            continue
+        a, b = e.face_ids
+        if face_chart.get(a) == face_chart.get(b):
+            out.append(e.id)
+    return out
+
+
+def enforce_fold_boundaries(mesh: MeshGraph, seams: set[int], *, fold_angle: float = FOLD_ANGLE,
+                            normals: np.ndarray | None = None) -> int:
+    """Split any chart that contains an interior mandatory fold edge until EVERY ≥
+    ``fold_angle`` fold is a chart BOUNDARY (so the unwrap actually cuts the UV there).
+    Rule 2 is unconditional — like disk-ification it runs to completion regardless of the
+    chart cap (the count may rise and is reported). The VSA 2-way ``split_chart`` separates
+    the two sides of a fold (their normals differ by ≥ ``fold_angle``), so the fold lands on
+    the new cut. Returns the number of splits performed."""
+    if normals is None:
+        normals = _face_normals(mesh)
+    from collections import Counter
+
+    splits = 0
+    for _ in range(mesh.face_count + 1):
+        interior = interior_fold_edges(mesh, seams, fold_angle=fold_angle)
+        if not interior:
+            break
+        charts = flood_charts(mesh, seams)
+        face_chart = {f: cid for cid, fs in enumerate(charts) for f in fs}
+        # Split the chart holding the most interior folds first (clears them fastest).
+        worst_cid = Counter(face_chart[mesh.edges[e].face_ids[0]] for e in interior).most_common(1)[0][0]
+        _, _, new_seams = split_chart(mesh, charts[worst_cid], seams, normals)
+        if not new_seams:
+            break  # degenerate chart that cannot be split — surfaced by the UV audit/gate
+        seams.update(new_seams)
+        splits += 1
+    return splits
+
+
+def edge_cut_cost(mesh: MeshGraph, edge_id: int, *, forbidden=frozenset(),
+                  fold_angle: float = FOLD_ANGLE, region_policy=None) -> float:
+    """Cost of routing a UV cut through ``edge_id`` (MINIMAL_DISTORTION_UV_PLAN follow-up).
+    A cut should run along sharp creases and AVOID flat connective edges, so it never
+    introduces a seam on a low-angle edge the user wants preserved:
+
+    - ``forbidden`` (user preserve set) → ``inf`` (never traversed),
+    - ≥ ``fold_angle`` mandatory fold → ~0 (free; prefer routing along real creases),
+    - otherwise cost grows quadratically as the dihedral flattens, so a 15° edge is far
+      more expensive than an 85° one.
+
+    ``region_policy`` (REGION_AWARE_FACE_UV_RECOVERY_PLAN §6.2): when given, the SUB-fold cost
+    is multiplied by the edge's region multiplier — a face_front_core smooth edge becomes very
+    expensive (the cut reroutes around the face) while a head_back/neck edge becomes cheap (the
+    cut is invited there). A ≥``fold_angle`` mandatory edge is NEVER multiplied (region cost can
+    never beat mandatory, §6.2). Used by the repair/reroute cut path (§6.4).
+
+    Note: ``dihedral_angle`` is unsigned, so concave/convex are treated alike (a sharper
+    fold is always cheaper to cut); a future signed-dihedral pass could prefer concave."""
+    if edge_id in forbidden:
+        return float("inf")
+    d = mesh.edges[edge_id].dihedral_angle
+    if d >= fold_angle:
+        return 0.05
+    cost = 1.0 + (fold_angle - d) ** 2 / 100.0
+    if region_policy is not None:
+        cost *= region_policy.edge_cost_multiplier(edge_id)
+    return cost
+
+
+def _vertex_edges(mesh: MeshGraph) -> dict[int, list[int]]:
+    out: dict[int, list[int]] = {}
+    for e in mesh.edges:
+        for v in e.vertex_ids:
+            out.setdefault(v, []).append(e.id)
+    return out
+
+
+def _chart_boundary_vertices(mesh: MeshGraph, chart_faces: set[int], seams: set[int]) -> set[int]:
+    """Vertices on the OUTER boundary of a chart — endpoints of edges with exactly one
+    incident face in the chart (a real chart border, necessarily a seam) or a mesh-boundary
+    edge of the chart. Interior 'slit' seams (both faces in the chart) are NOT boundary, so a
+    fold endpoint buried inside the chart is correctly seen as interior (needs extending)."""
+    bverts: set[int] = set()
+    seen: set[int] = set()
+    for f in chart_faces:
+        for eid in mesh.faces[f].edge_ids:
+            if eid in seen:
+                continue
+            seen.add(eid)
+            e = mesh.edges[eid]
+            inside = sum(1 for fc in e.face_ids if fc in chart_faces)
+            if e.is_boundary or (len(e.face_ids) == 2 and inside == 1):
+                bverts.update(e.vertex_ids)
+    return bverts
+
+
+def _cut_path_to_boundary(mesh, start, bverts, chart_faces, seams, forbidden, fold_angle,
+                          vert_edges, region_policy=None):
+    """Min-cost path of CHART-INTERIOR edges from ``start`` to any chart-boundary vertex
+    (Dijkstra over :func:`edge_cut_cost`). Returns the path edge ids (empty if ``start`` is
+    already on the boundary) or ``None`` if no path exists (closed chart)."""
+    import heapq
+    if start in bverts:
+        return []
+    inf = float("inf")
+    dist = {start: 0.0}
+    prev_edge: dict[int, int] = {}
+    pq = [(0.0, start)]
+    while pq:
+        d, v = heapq.heappop(pq)
+        if d > dist.get(v, inf):
+            continue
+        if v != start and v in bverts:
+            path = []
+            cur = v
+            while cur in prev_edge:
+                eid = prev_edge[cur]
+                path.append(eid)
+                a, b = mesh.edges[eid].vertex_ids
+                cur = a if b == cur else b
+            return path
+        for eid in vert_edges.get(v, ()):
+            e = mesh.edges[eid]
+            if eid in seams or len(e.face_ids) != 2:
+                continue
+            if e.face_ids[0] not in chart_faces or e.face_ids[1] not in chart_faces:
+                continue
+            cost = edge_cut_cost(mesh, eid, forbidden=forbidden, fold_angle=fold_angle,
+                                 region_policy=region_policy)
+            if cost == inf:
+                continue
+            a, b = e.vertex_ids
+            nb = a if b == v else b
+            nd = d + cost
+            if nd < dist.get(nb, inf):
+                dist[nb] = nd
+                prev_edge[nb] = eid
+                heapq.heappush(pq, (nd, nb))
+    return None
+
+
+def split_welded_folds(mesh: MeshGraph, seams: set[int], welded_edge_ids,
+                       normals: np.ndarray | None = None, *, forbidden=frozenset(),
+                       fold_angle: float = FOLD_ANGLE, region_policy=None) -> dict:
+    """Make each fold that welded in the actual UV a real chart boundary, with a LOCAL,
+    minimum-cost cut (MINIMAL_DISTORTION_UV_PLAN follow-up). Replaces the old chart-wide VSA
+    split, which drew a broad new boundary that could slice through low-angle connective
+    edges (e.g. cutting a 15° edge next to one 90° fold).
+
+    For each welded fold E (its two faces in one chart), extend a cut from each interior
+    endpoint of E to the chart boundary along the cheapest path (``edge_cut_cost`` favours
+    creases, forbids the preserve set, penalises flat edges). E plus the two extensions
+    separates the disk, so the next unwrap UV-cuts E while touching as few low-angle edges as
+    possible. If the local cut fails to separate (rare; non-disk/closed chart) it falls back
+    to the old VSA chart split. Returns ``{"added": set, "local_cuts": int, "fallback": int}``
+    — ``added`` are the auxiliary (non-mandatory) seam edges, recorded for later pruning."""
+    if normals is None:
+        normals = _face_normals(mesh)
+    forbidden = set(forbidden)
+    vert_edges = _vertex_edges(mesh)
+    added: set[int] = set()
+    local = 0
+    fallback = 0
+
+    def chart_of(face):
+        charts = flood_charts(mesh, seams)
+        return charts, {f: i for i, fs in enumerate(charts) for f in fs}
+
+    for eid in welded_edge_ids:
+        e = mesh.edges[eid]
+        if len(e.face_ids) != 2:
+            continue
+        fa, fb = e.face_ids
+        charts, fc = chart_of(fa)
+        if fc.get(fa) != fc.get(fb):
+            continue  # already separated by an earlier fold's cut
+        chart_faces = set(charts[fc[fa]])
+        bverts = _chart_boundary_vertices(mesh, chart_faces, seams)
+        path_added: set[int] = set()
+        reached = True
+        for vx in e.vertex_ids:
+            path = _cut_path_to_boundary(mesh, vx, bverts, chart_faces, seams,
+                                         forbidden, fold_angle, vert_edges, region_policy)
+            if path is None:
+                reached = False
+                break
+            for pe in path:
+                if pe not in seams:
+                    seams.add(pe)
+                    path_added.add(pe)
+        # Verify the local cut actually separated E's two faces.
+        _, fc2 = chart_of(fa)
+        if reached and fc2.get(fa) != fc2.get(fb):
+            added.update(path_added)
+            local += 1
+            continue
+        # Fallback: undo the partial local cut and VSA-split the whole chart (last resort).
+        seams.difference_update(path_added)
+        _, _, ns = split_chart(mesh, charts[fc[fa]], seams, normals)
+        ns = [s for s in ns if s not in forbidden]
+        if ns:
+            seams.update(ns)
+            added.update(ns)
+            fallback += 1
+    return {"added": added, "local_cuts": local, "fallback": fallback}
+
+
 def flood_charts(mesh: MeshGraph, seams: set[int]) -> list[list[int]]:
     """Connected face groups that never cross a seam edge — the minimal chart set
     consistent with the current seams (R1 starts here)."""
@@ -326,11 +556,25 @@ def segment(
         history.append({"stage": "straighten", "moved": n_moved,
                         "charts": len(_charts_from_seams(mesh, seams))})
 
+    # R2 protection (MINIMAL_DISTORTION_UV_PLAN §5.1): mandatory folds are seeded up front
+    # and every pass (absorb/merge/straighten) already refuses to cross them, but re-assert
+    # the union here as a belt-and-suspenders guard so no refactor can ever drop one.
+    seams |= mandatory_seam_edges(mesh, fold_angle=fold_angle)
+
+    # NOTE: folds that are interior to a chart (a lone crease that doesn't reach the
+    # boundary, or one a merge buried) would weld in the UV. We do NOT pre-split them all
+    # here: the flood-chart heuristic can't tell which interior slits Blender actually welds
+    # (it cuts any slit that reaches a chart boundary), so doing so over-fragments. The real
+    # weld is detected post-unwrap from the UVMap and repaired with targeted splits in the
+    # pipeline loop (MINIMAL_DISTORTION_UV_PLAN §M2).
     charts = _charts_from_seams(mesh, seams)
     face_chart = {fid: cid for cid, fs in enumerate(charts) for fid in fs}
     final_nondisk = sum(0 if is_disk(mesh, fs) else 1 for fs in charts)
+    audit = mandatory_seam_audit(mesh, seams, fold_angle=fold_angle)
     history.append({"stage": "final", "charts": len(charts), "non_disk": final_nondisk,
-                    "cap_exceeded": len(charts) > max_charts})
+                    "cap_exceeded": len(charts) > max_charts,
+                    "mandatory_90_edges": audit["mandatory_90_edges"],
+                    "mandatory_90_missing": audit["mandatory_90_missing"]})
     return ChartSegmentation(mesh=mesh, face_chart=face_chart, seams=seams, history=history)
 
 

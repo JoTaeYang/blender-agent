@@ -79,6 +79,7 @@ def test_boundary_straightness_straight_line_scores_high():
 # -- gate config (chart-UV plan §2, calibrated U0) --------------------------
 
 GOOD = {
+    "mandatory_90_missing": 0, "mandatory_90_uv_unsplit": 0, "worst_island_distortion": 0.45,
     "overlap_ratio": 0.0005, "raster_overlap_ratio": 0.001, "stretch_score": 0.35, "packing_efficiency": 0.74,
     "island_count": 38, "small_island_ratio": 0.1, "vt_v_ratio": 1.4,
     "texel_density_variance": 0.5, "uv_bounds_ok": True, "fallback_used": False,
@@ -96,19 +97,38 @@ def test_calibrated_bars_pinned():
     # Recalibrated: Blender auto-packs the reference's OWN charts to only 0.62 (the
     # artist's 0.76 is manual), so ≥0.70 is unreachable; 0.50 is the auto-floor.
     assert cfg.packing_min == 0.42  # SLIM floor (§5d correctness)
-    assert cfg.island_count_max == 60
+    assert cfg.island_count_max == 80  # safety cap (MINIMAL_DISTORTION_UV_PLAN §7)
 
 
 def test_artist_style_layout_passes():
     assert _g().passed
 
 
-def test_stretch_and_packing_are_hard():
+def test_stretch_is_hard_packing_is_advisory():
+    # Checker/stretch distortion stays HARD (the user's rule 3); packing is now ADVISORY
+    # (MINIMAL_DISTORTION_UV_PLAN §7 — never block shipping / force a split on packing).
     assert "stretch_score" in [c.name for c in _g(stretch_score=1.5).failures]
-    assert "packing_efficiency" in [c.name for c in _g(packing_efficiency=0.4).failures]
+    low_pack = _g(packing_efficiency=0.4)
+    assert "packing_efficiency" not in [c.name for c in low_pack.failures]
+    assert "packing_efficiency" in [c.name for c in low_pack.advisories]
+    assert low_pack.passed  # advisory miss alone still ships
 
 
 def test_fallback_and_overlap_and_bounds_hard():
     assert "fallback_used" in [c.name for c in _g(fallback_used=True).failures]
     assert "overlap_ratio" in [c.name for c in _g(overlap_ratio=0.05).failures]
     assert "uv_bounds" in [c.name for c in _g(uv_bounds_ok=False).failures]
+
+
+def test_mandatory_90_seam_is_hard():
+    # Rule 2: a missing ≥90° seam is a hard failure (MINIMAL_DISTORTION_UV_PLAN §M2).
+    assert _g().passed
+    assert "mandatory_90_missing" in [c.name for c in _g(mandatory_90_missing=3).failures]
+
+
+def test_worst_island_distortion_is_hard_even_when_global_passes():
+    # Rule 3 per-island: a low GLOBAL stretch must NOT let one badly-stretched island ship.
+    g = _g(stretch_score=0.2, worst_island_distortion=0.9)
+    assert "stretch_score" not in [c.name for c in g.failures]   # global passes
+    assert "worst_island_distortion" in [c.name for c in g.failures]  # per-island blocks
+    assert not g.passed

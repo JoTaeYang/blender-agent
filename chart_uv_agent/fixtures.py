@@ -51,6 +51,38 @@ def build_capsule_with_spikes(segments: int = 20, rings: int = 18, *, n_spikes: 
     return _rebuild(sphere, co, object_id)
 
 
+def build_folded_planes(n: int = 6, *, object_id: str = "folded_planes") -> MeshGraph:
+    """Two flat ``n×n`` quad grids meeting at a 90° fold (MINIMAL_DISTORTION_UV_PLAN §8
+    Test 1). Grid A lies in the z=0 plane (0≤x,y≤1); grid B rises in +z from the shared
+    top row (y=1, z=0), so the shared edge bends exactly 90°. The fold edges MUST become
+    mandatory seams (R2); each flat half unwraps with zero distortion (R1 keeps it whole)."""
+    coords: list[tuple[float, float, float]] = []
+    idx: dict[tuple[str, int, int], int] = {}
+    for i in range(n + 1):           # grid A: x = i/n, y = j/n, z = 0
+        for j in range(n + 1):
+            idx[("A", i, j)] = len(coords)
+            coords.append((i / n, j / n, 0.0))
+    for i in range(n + 1):           # grid B: x = i/n, y = 1, z = k/n (k=0 shares A's top row)
+        for k in range(1, n + 1):
+            idx[("B", i, k)] = len(coords)
+            coords.append((i / n, 1.0, k / n))
+
+    def vA(i, j):
+        return idx[("A", i, j)]
+
+    def vB(i, k):
+        return idx[("A", i, n)] if k == 0 else idx[("B", i, k)]
+
+    faces: list[list[int]] = []
+    for i in range(n):
+        for j in range(n):
+            faces.append([vA(i, j), vA(i + 1, j), vA(i + 1, j + 1), vA(i, j + 1)])
+    for i in range(n):
+        for k in range(n):
+            faces.append([vB(i, k), vB(i + 1, k), vB(i + 1, k + 1), vB(i, k + 1)])
+    return MeshGraph.from_faces(object_id, coords, faces)
+
+
 def build_humanoid_blob(segments: int = 20, rings: int = 20, *,
                         object_id: str = "humanoid_blob") -> MeshGraph:
     """A crude torso-with-limbs blob (elongated body + four directional bulges) — a

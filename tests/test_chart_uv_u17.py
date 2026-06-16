@@ -51,31 +51,36 @@ def test_tail_round_fixes_an_artificial_spiky_chart():
     assert _disks_and_r2(mesh, seams)
 
 
-# -- shippable-with-stuck rule (§5c) ----------------------------------------
+# -- convexity is now ADVISORY (MINIMAL_DISTORTION_UV_PLAN §7) ----------------
 
 def _gate(**m):
-    base = {"overlap_ratio": 0.0, "raster_overlap_ratio": 0.001, "stretch_score": 0.3, "packing_efficiency": 0.6,
-            "island_count": 40, "small_island_ratio": 0.2, "texel_density_variance": 0.5,
-            "vt_v_ratio": 1.4, "uv_bounds_ok": True, "fallback_used": False,
-            "convexity_mean": 0.78, "convexity_p10": 0.45,  # below the 0.55 bar
+    base = {"mandatory_90_missing": 0, "mandatory_90_uv_unsplit": 0, "worst_island_distortion": 0.4,
+            "overlap_ratio": 0.0, "raster_overlap_ratio": 0.001, "stretch_score": 0.3,
+            "packing_efficiency": 0.6, "island_count": 40, "small_island_ratio": 0.2,
+            "texel_density_variance": 0.5, "vt_v_ratio": 1.4, "uv_bounds_ok": True,
+            "fallback_used": False, "convexity_mean": 0.78, "convexity_p10": 0.45,  # below 0.55
             "boundary_smoothness_mean": 1.4, "tendril_count": 0}
     return evaluate_chart_gate({**base, **m}, config=ChartGateConfig())
 
 
-def test_convexity_p10_only_failure_with_stuck_is_shippable():
-    gate = _gate()  # only convexity_p10 fails
-    assert [c.name for c in gate.failures] == ["convexity_p10"]
-    assert shippable_with_stuck(gate, stuck_charts=[{"size": 9, "convexity": 0.3}]) is True
-    # ...but NOT shippable if there are no proven-stuck charts.
-    assert shippable_with_stuck(gate, stuck_charts=[]) is False
+def test_convexity_p10_below_bar_is_advisory_not_blocking():
+    # The plan demotes convexity to a report-only signal: a below-bar worst-decile chart
+    # is an ADVISORY, never a hard failure, so the gate still passes and ships.
+    gate = _gate()  # convexity_p10 below bar, everything else OK
+    assert gate.passed
+    assert "convexity_p10" not in [c.name for c in gate.failures]
+    assert "convexity_p10" in [c.name for c in gate.advisories]
+    assert shippable_with_stuck(gate, stuck_charts=[]) is True
 
 
-def test_other_failures_block_shipping_even_with_stuck():
-    gate = _gate(overlap_ratio=0.05)  # overlap AND convexity_p10 fail
+def test_hard_failures_still_block_shipping():
+    gate = _gate(overlap_ratio=0.05)  # overlap is hard; convexity_p10 advisory
+    assert not gate.passed
+    assert [c.name for c in gate.failures] == ["overlap_ratio"]
     assert shippable_with_stuck(gate, stuck_charts=[{"size": 9, "convexity": 0.3}]) is False
 
 
 def test_passing_gate_is_shippable():
-    gate = _gate(convexity_p10=0.6)  # passes the tail bar
+    gate = _gate(convexity_p10=0.6)  # passes the (advisory) tail bar
     assert gate.passed
     assert shippable_with_stuck(gate, stuck_charts=[]) is True

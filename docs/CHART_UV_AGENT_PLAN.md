@@ -1,11 +1,34 @@
 # Chart-Based UV Agent — Implementation Plan (uv_agent v2)
 
-> **2026-06-13 STATUS**: geometric targets reached (stretch 0.2–0.3, raster
-> overlap fixed via §5d), but team-lead review rejected the layout as not
-> *semantically* similar to the reference (part-based design intent cannot be
-> reproduced from geometry alone). For this asset the pipeline moves to
-> reference-guided chart transfer — see **`docs/UV_TRANSFER_PLAN.md`**. This
-> engine stays as the no-reference mode.
+> **2026-06-13 STATUS — ALSO THE LOWER-LEVEL FALLBACK / COMPONENT for the artist
+> engine.** `docs/AUTO_ARTIST_UV_PLAN.md` adds `--uv-engine artist`, a semantic
+> *artist-style* path. It reuses this engine's primitives directly: `split_chart`
+> / `flood_charts` / `normal_cone_halfangle` drive the artist seam layer's diskify
+> + cone-split, and a `blob`/`unknown` part falls back to chart-style segmentation
+> *for that part only*. `chart` stays the default generic engine; `artist` is the
+> no-reference artist-style target (NOT default yet — needs the §AR7 fixture suite).
+>
+> **2026-06-13 STATUS — GENERIC DEFAULT ENGINE.** Per
+> `docs/GENERIC_UV_REVISION_PLAN.md`, this is the **default P5 engine** for the
+> general low-poly→UV product path: `--uv-engine auto` resolves to `chart`
+> UNCONDITIONALLY (even when a reference happens to carry UVs). It is the right
+> default because it needs no reference and makes no part-based / slot
+> assumptions. Reference-guided transfer (`docs/UV_TRANSFER_PLAN.md`) is now an
+> *explicit, reference-assisted mode only* (`--uv-engine transfer`), NOT the
+> default — a single reference's chart topology must not leak onto arbitrary
+> assets. Future quality work concentrates here, in chart segmentation/repair and
+> generic multi-asset fixtures, not in matching one artist layout.
+>
+> The gate (`chart_uv_agent/gate.py`) measures UV *usability* — correctness +
+> generic quality — not resemblance to any reference. Its numeric thresholds are
+> calibrated acceptance defaults pinned on one asset and MUST be recalibrated on a
+> multi-asset fixture set before production (GENERIC_UV_REVISION_PLAN §G3).
+
+> **Superseded note (kept for history):** geometric targets reached (stretch
+> 0.2–0.3, raster overlap fixed via §5d), but an earlier team-lead review rejected
+> the layout as not *semantically* similar to one reference. That drove the
+> reference-transfer experiment; the generic revision (above) re-establishes this
+> engine as the product default.
 
 > Audience: implementation agent. This plan creates a NEW UV engine that replaces
 > `uv_agent` as the P5 stage of the adaptive low-poly pipeline

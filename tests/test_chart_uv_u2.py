@@ -77,22 +77,26 @@ def test_split_flipped_charts_targets_only_flipped():
 # -- _better selection + gate verdicts --------------------------------------
 
 def _gate(**m):
-    base = {"overlap_ratio": 0.0, "raster_overlap_ratio": 0.001, "stretch_score": 0.3, "packing_efficiency": 0.75,
-            "island_count": 30, "small_island_ratio": 0.2, "texel_density_variance": 0.5,
-            "vt_v_ratio": 1.4, "uv_bounds_ok": True, "fallback_used": False,
-            "convexity_mean": 0.78, "convexity_p10": 0.6, "boundary_smoothness_mean": 1.4, "tendril_count": 0}
+    base = {"mandatory_90_missing": 0, "mandatory_90_uv_unsplit": 0, "worst_island_distortion": 0.4,
+            "overlap_ratio": 0.0, "raster_overlap_ratio": 0.001, "stretch_score": 0.3,
+            "packing_efficiency": 0.75, "island_count": 30, "small_island_ratio": 0.2,
+            "texel_density_variance": 0.5, "vt_v_ratio": 1.4, "uv_bounds_ok": True,
+            "fallback_used": False, "convexity_mean": 0.78, "convexity_p10": 0.6,
+            "boundary_smoothness_mean": 1.4, "tendril_count": 0}
     metrics = {**base, **m}
     return metrics, evaluate_chart_gate(metrics, config=ChartGateConfig())
 
 
 def test_better_prefers_passing_gate():
     pm, pg = _gate()                       # passes
-    fm, fg = _gate(packing_efficiency=0.4)  # fails
+    fm, fg = _gate(stretch_score=1.5)       # fails (hard distortion gate)
     assert _better(pm, pg, {"gate": fg, "metrics": fm})
     assert not _better(fm, fg, {"gate": pg, "metrics": pm})
 
 
 def test_better_among_failing_prefers_lower_stretch():
-    am, ag = _gate(packing_efficiency=0.4, stretch_score=0.2)
-    bm, bg = _gate(packing_efficiency=0.4, stretch_score=0.4)
+    # Both fail a hard NON-stretch gate (texel density), so _better falls through to the
+    # lower-stretch tiebreak.
+    am, ag = _gate(texel_density_variance=2.0, stretch_score=0.2)
+    bm, bg = _gate(texel_density_variance=2.0, stretch_score=0.4)
     assert _better(am, ag, {"gate": bg, "metrics": bm})

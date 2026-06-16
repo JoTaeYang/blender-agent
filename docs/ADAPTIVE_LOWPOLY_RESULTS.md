@@ -1,5 +1,71 @@
 # Adaptive Low-Poly — Acceptance Results (plan §10 DoD)
 
+> **2026-06-13 — UV engine results are split by mode (GENERIC_UV_REVISION_PLAN).**
+> The P5 numbers in this file come from runs on the single `humanstatue` asset and
+> mix two distinct engines — keep them separate when reading:
+> - **Generic `chart` engine** (the product default, `--uv-engine auto`/`chart`):
+>   geometry-driven, no reference. Its gate measures UV *usability*, not reference
+>   resemblance. These are the numbers that generalise across assets.
+> - **`transfer` engine** (explicit `--uv-engine transfer`, reference-assisted):
+>   experiments that optimised for side-by-side similarity to ONE artist UV. Treat
+>   these as a special-case comparison study, NOT a generic acceptance bar.
+> - **`artist` engine** (explicit `--uv-engine artist`, no reference —
+>   `docs/AUTO_ARTIST_UV_PLAN.md`): the artist-style path. Tracked SEPARATELY; see
+>   "Artist engine — first results" below. Its quality gates (stretch/packing/
+>   convexity) are deliberately uncalibrated until the §AR7 fixture suite runs.
+> Generic chart quality should be re-measured on the §G3 multi-asset fixture set;
+> the humanstatue is not the sole calibration asset.
+
+## Artist engine — first results (`--uv-engine artist`, AUTO_ARTIST_UV_PLAN)
+
+P5-resume smoke on the `humanstatue` 5,756-face adaptive mesh (Blender 5.0.1 headless;
+`--from-phase P5 --uv-engine artist --mesh-blend …/adaptive_t5850.blend`):
+
+| metric                 | value   | gate tier | note |
+|------------------------|---------|-----------|------|
+| parts (semantic)       | 23      | report    | 6 blob, 4 cylinder, 2 strip, 11 detail |
+| charts                 | 60      | quality   | ≤ 80 cap, ok |
+| symmetry pairs         | 2       | report    | mate-paired, adjacent in layout |
+| `raster_overlap_ratio` | 0.0     | **HARD** ✅ | overlap-free by construction (band/shelf pack) |
+| `overlap_ratio`        | ~0      | **HARD** ✅ | SLIM injective; mirror disabled in v1 (would flip winding) |
+| `texel_density_variance` | 0.0   | **HARD** ✅ | uniform density (weight = 1.0) |
+| `uv_bounds_ok`         | true    | **HARD** ✅ | |
+| `min_island_size`      | ok      | **HARD** ✅ | cone-split guarded against sub-floor non-detail charts |
+| `readability_score`    | 0.93    | report    | orientation 1.0, details-near-parent 1.0 |
+| `stretch_score`        | 0.55    | quality ❌ | over the 0.50 bar — calibrate in §AR7 |
+| `packing_efficiency`   | 0.24    | quality ❌ | bbox shelf pack on irregular organic charts; readability over packing (plan §5.A6). Tight intra-group (CONCAVE) packing is the §AR7 lever |
+| `convexity_p10`        | < 0.50  | quality ❌ | worst-decile chart convexity — calibrate |
+
+> **2026-06-13 UPDATE — band/shelf packer removed; cylinder template + hard gates added.**
+> After the first full run shipped a tile-wasting 0.24-packing layout (and trident-as-blob
+> UVs), the band/shelf BBOX packer was demoted to debug-only and the FINAL layout is now the
+> Blender CONCAVE packer; `packing_efficiency` and a new `cylinder_rectangular` check were
+> promoted to HARD. A dedicated cylinder template (cap separation + lengthwise cut) now
+> flattens tubes into rectangles. Re-run on `humanstatue` t5850: **packing 0.24 → 0.55**,
+> **stretch 0.55 → 0.48**, gate ACCEPTED with **no hard AND no quality fails**. Trident
+> shaft: a 6.6:1 rectangular strip + cap (was an aspect-1.8 blob); `cylinder_blob_count = 0`.
+> BRANCH SEGMENTATION (`segmentation.split_branched_parts`, axis cross-section sweep) was
+> added to separate multi-prong forks (shaft/tine). It SAFELY fires only where an end region
+> DISCONNECTS into ≥3 components, so it splits genuine forks (a real fork in the humanstatue
+> dropped **stretch 0.48 → 0.075**, 6×) but never imposes arbitrary cuts. Verified at 5756
+> AND 10k faces: the trident's own 3 prongs are SOLID CONNECTED geometry (the end region is
+> one component at every cut level — the prongs are joined by head/webbing, no gaps), so they
+> are correctly NOT split and the trident unwraps as one 6.6:1 rectangular strip (passes the
+> no-blob gate). Per-tine separation is impossible without arbitrary cuts at these
+> resolutions — the tine geometry isn't there. Cost of the branch split: `convexity_p10`
+> 0.40 (thin prong charts) — a non-blocking QUALITY miss. The table below is the pre-fix
+> snapshot.
+
+**Verdict: gate ACCEPTED** (all HARD gates pass; quality misses reported, non-blocking).
+Outputs per run: `p5_gate.json`, `artist_parts.json`, `artist_layout.json`,
+`artist_uv_colored_by_part.png` (+ `.svg`), `artist_part_debug_front/side.png` (EEVEE
+emission, parts coloured on the 3D model). The UV overlay reads as artist bands (details
+top, blob/panel middle, strips/cylinders bottom) grouped by part — visibly more organised
+than the chart engine's scatter. NOT default yet (plan §8): needs the §AR7 multi-asset
+fixture suite + quality-gate calibration.
+
+
+
 End-to-end `--mode adaptive` runs on the real `sample/humanstatue.obj` (24.9M faces)
 via the validated P1 proxy (999,328-face watertight manifold). Blender 5.0.1 headless,
 one process per budget. Reference = `sample/humanstatue_low.obj` (5,850 faces, 3,191

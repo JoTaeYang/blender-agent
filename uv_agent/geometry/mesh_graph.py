@@ -88,6 +88,8 @@ class MeshGraph:
     faces: list[Face]
     loops: list[Loop]
     _edge_index: dict[tuple[int, int], int] = field(default_factory=dict, repr=False)
+    _face_adjacency_cache: dict[int, list[tuple[int, int]]] | None = field(
+        default=None, repr=False, compare=False)
 
     # -- lookups -----------------------------------------------------------
     @property
@@ -118,14 +120,22 @@ class MeshGraph:
         return self._edge_index[(a, b) if a < b else (b, a)]
 
     def face_adjacency(self) -> dict[int, list[tuple[int, int]]]:
-        """face_id -> list of (neighbor_face_id, shared_edge_id)."""
-        adj: dict[int, list[tuple[int, int]]] = {f.id: [] for f in self.faces}
-        for e in self.edges:
-            if len(e.face_ids) == 2:
-                a, b = e.face_ids
-                adj[a].append((b, e.id))
-                adj[b].append((a, e.id))
-        return adj
+        """face_id -> list of (neighbor_face_id, shared_edge_id).
+
+        Lazily cached: this is rebuilt O(E) on every call, and the segmentation / seam
+        passes call it thousands of times (``split_chart``, ``flood_charts``, the diskify
+        loop). The graph is used immutably after construction (seam edits live in external
+        ``set``s, never on the mesh), and callers only READ the returned dict, so memoising
+        and sharing one instance is safe and a large speed-up on real assets."""
+        if self._face_adjacency_cache is None:
+            adj: dict[int, list[tuple[int, int]]] = {f.id: [] for f in self.faces}
+            for e in self.edges:
+                if len(e.face_ids) == 2:
+                    a, b = e.face_ids
+                    adj[a].append((b, e.id))
+                    adj[b].append((a, e.id))
+            self._face_adjacency_cache = adj
+        return self._face_adjacency_cache
 
     # -- construction ------------------------------------------------------
     @classmethod

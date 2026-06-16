@@ -1,9 +1,26 @@
 # Reference-Guided UV Transfer — Implementation Plan (`--uv-engine transfer`)
 
+> **2026-06-13 STATUS — THE REFERENCE-ASSISTED SPECIAL CASE.** Transfer is the
+> path for "an artist UV of THIS object already exists somewhere"; for the
+> *no-reference* artist-style goal use `--uv-engine artist`
+> (`docs/AUTO_ARTIST_UV_PLAN.md`), which invents artist-style seams/layout from
+> geometry alone. Transfer is unchanged below and remains explicit-only.
+>
+> **2026-06-13 STATUS — EXPLICIT REFERENCE-ASSISTED MODE, NOT THE DEFAULT.** Per
+> `docs/GENERIC_UV_REVISION_PLAN.md`, transfer is selected **only** when the caller
+> explicitly passes `--uv-engine transfer` AND supplies a UV'd `--reference` that
+> represents the SAME object in the SAME world space. `--uv-engine auto` does NOT
+> pick transfer, even when the reference has UVs — it resolves to the generic
+> `chart` engine (`docs/CHART_UV_AGENT_PLAN.md`, the product default). Transfer
+> fails loud without a UV'd reference; it never silently falls back to `chart`. Its
+> assumptions (shared object/world-space, nearest-surface chart-id projection) are
+> true for the humanstatue comparison flow but false for arbitrary assets, so it is
+> a special review/comparison workflow, not the general path.
+
 > Audience: implementation agent. This plan adds a THIRD P5 UV engine that
 > transfers the reference asset's chart layout onto the adaptive low-poly mesh.
 > Context: `docs/ADAPTIVE_LOWPOLY_PLAN.md` (pipeline), `docs/CHART_UV_AGENT_PLAN.md`
-> (the geometric chart engine this supersedes *for this asset*).
+> (the geometric chart engine, now the generic default).
 
 ## 1. Why (team-lead review, 2026-06-13)
 

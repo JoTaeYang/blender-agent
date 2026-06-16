@@ -28,13 +28,20 @@ def unwrap_and_pack(
     method: str = "MINIMUM_STRETCH",
     minimize_iters: int = 0,
     pack_shape: str = "CONCAVE",
+    rotate: bool = True,
+    average_scale: bool = True,
     layer_name: str = AI_UV_LAYER,
 ) -> int:
     """Mark ``seams``, unwrap, density-normalise, and pack (U2.1/U2.3/U3.1). The default
     method is **SLIM (``MINIMUM_STRETCH``)** — it is locally injective, so charts do not
     self-fold (the §5d correctness fix; ABF folds and the raster gate caught it). We do
     NOT run the separate ``minimize_stretch`` op for SLIM: it is not injective and would
-    re-introduce folds. Returns the seam count marked; UVs land in ``layer_name``."""
+    re-introduce folds. Returns the seam count marked; UVs land in ``layer_name``.
+
+    ``rotate`` / ``average_scale`` / ``minimize_iters`` are the levers the UV Layout
+    Optimization Loop (UV_LAYOUT_OPTIMIZATION_LOOP_PLAN §8) sweeps across candidates; the
+    defaults reproduce the prior single-unwrap behaviour exactly (existing callers
+    unchanged)."""
     import bpy
 
     mesh = obj.data
@@ -55,11 +62,12 @@ def unwrap_and_pack(
                 bpy.ops.uv.minimize_stretch(iterations=int(minimize_iters))
             except RuntimeError:
                 pass
-        try:
-            bpy.ops.uv.average_islands_scale()
-        except RuntimeError:
-            pass
-        _pack(bpy, margin, pack_shape)
+        if average_scale:
+            try:
+                bpy.ops.uv.average_islands_scale()
+            except RuntimeError:
+                pass
+        _pack(bpy, margin, pack_shape, rotate=rotate)
     finally:
         bpy.ops.object.mode_set(mode="OBJECT")
     mesh.update()
