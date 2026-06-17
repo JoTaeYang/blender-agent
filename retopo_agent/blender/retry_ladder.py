@@ -27,6 +27,7 @@ def run_decimation_retry_ladder_blender(
     allow_component_removal: bool = False,
     shape_thresholds=None,
     max_graph_faces: int = 2_000_000,
+    max_attempts: int | None = None,
 ):
     """Run the DM5 ladder on ``base_obj``.
 
@@ -34,7 +35,7 @@ def run_decimation_retry_ladder_blender(
     :class:`~retopo_agent.geometry.retry_ladder.LadderResult` (or ``None`` if the
     base mesh is too large to diagnose) and a new Blender object holding the
     selected candidate (or ``None`` if no attempt improved on the base)."""
-    from retopo_agent.geometry.retry_ladder import make_attempt_executor, run_retry_ladder
+    from retopo_agent.geometry.retry_ladder import LADDER, make_attempt_executor, run_retry_ladder
     from retopo_agent.geometry.shape_eval import DECIMATION_SHAPE_THRESHOLDS
     from uv_agent.blender.extract import extract_mesh_graph
 
@@ -55,7 +56,8 @@ def run_decimation_retry_ladder_blender(
         relaxed_angle=relaxed_angle,
         allow_component_removal=allow_component_removal,
     )
-    ladder = run_retry_ladder(execute, target_face_count=target_face_count)
+    rungs = LADDER if max_attempts is None else LADDER[: max(0, int(max_attempts))]
+    ladder = run_retry_ladder(execute, target_face_count=target_face_count, ladder=rungs)
 
     selected = ladder.selected
     result_obj = None

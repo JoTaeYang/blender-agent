@@ -142,6 +142,12 @@ def render_shape_preview(low_obj, filepath: str) -> bool:
         radius = max(low_obj.dimensions) or 1.0
 
         cam_data = bpy.data.cameras.new("AI_Retopo_Cam")
+        # Clip range must span the scene's scale: the camera sits ~2.6*radius from the
+        # subject, and assets imported in world space can be hundreds of units across and
+        # far from the origin. The default clip_end (100) clips the whole subject away,
+        # producing a blank preview. Scale both planes to the bounding radius.
+        cam_data.clip_start = max(0.01, radius * 0.001)
+        cam_data.clip_end = radius * 100.0 + 1000.0
         cam = bpy.data.objects.new("AI_Retopo_Cam", cam_data)
         scene.collection.objects.link(cam)
         cam.location = center + Vector((1.0, -1.4, 0.9)).normalized() * radius * 2.6

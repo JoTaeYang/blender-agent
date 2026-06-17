@@ -143,8 +143,11 @@ def _decimation_mock_plan(job: dict) -> dict:
             str(job.get("decimation_policy", "balanced")).strip().lower() == "strict_target",
         ),
         # DM5 progressive retry ladder, run automatically when the primary collapse
-        # misses the target band (plan §8). On by default.
+        # misses the target band (plan §8). On by default. ``retry_ladder_max_attempts``
+        # caps how many ladder rungs run (default 1 = a single escalation attempt;
+        # higher = more thorough but slower, esp. on dense proxies).
         "retry_ladder": _as_bool(job.get("retry_ladder"), True),
+        "retry_ladder_max_attempts": int(job.get("retry_ladder_max_attempts", 1)),
         "plan": [
             {
                 "tool": "generate_decimated_mesh",
@@ -518,6 +521,7 @@ def _run_decimation(bpy, job, obj, out_dir) -> int:
         ladder, retry_obj = run_decimation_retry_ladder_blender(
             result.obj, target, reference_obj=obj, feature_angle=feature_angle,
             allow_component_removal=allow_removal, shape_thresholds=DECIMATION_SHAPE_THRESHOLDS,
+            max_attempts=int(plan.get("retry_ladder_max_attempts", 1)),
         )
         if ladder is not None:
             with open(os.path.join(out_dir, "decimation_attempts.json"), "w", encoding="utf-8") as fh:
