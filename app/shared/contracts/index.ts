@@ -9,6 +9,45 @@
 
 export const SCHEMA_VERSION = 1;
 
+// MVP 1 UV review contract (commands, review statuses, summary shapes).
+export * from './uvReview';
+import type {
+  InspectUvResult,
+  ReviewOptions,
+  UvReviewRunView,
+} from './uvReview';
+
+// MVP 2 seam editor contract (edge geometry, seam spec, validation, IPC).
+export * from './seamEditor';
+import type {
+  SeamEditorRunView,
+  SeamSpec,
+  SeamValidation,
+} from './seamEditor';
+
+// MVP 3 generate + optimize contract (run, candidate summary, validation, IPC).
+export * from './uvGenerate';
+import type {
+  CandidateSummary,
+  GenerateUvOptions,
+  SelectCandidateResult,
+  UvGenerateRunView,
+  ValidateGenerateInput,
+} from './uvGenerate';
+
+// MVP 5 production export contract (readiness, export, manifest, history, rollback).
+export * from './export';
+import type {
+  ExportOptions,
+  ExportReadiness,
+  ExportRunView,
+  HistoryEvent,
+  ListRollbackTargetsResult,
+  RollbackResult,
+  RollbackTargetType,
+  StartExportResult,
+} from './export';
+
 // --- App-facing worker commands (plan §5) ---------------------------------
 export const Command = {
   InspectModel: 'inspect_model',
@@ -70,6 +109,27 @@ export interface Project {
   working_model_fbx: string | null;
   approved_lowpoly_run_id: string | null;
   runs: string[];
+  // --- MVP 1 UV review extension (plan §9) — optional so MVP 0 projects load ---
+  selected_uv_layer?: string | null;
+  latest_uv_review_run_id?: string | null;
+  uv_review_runs?: string[];
+  // --- MVP 2 seam editor extension (plan §9) — optional so older projects load ---
+  active_user_seam_spec?: string | null;
+  latest_seam_editor_run_id?: string | null;
+  seam_editor_runs?: string[];
+  // --- MVP 3 generate + optimize extension (plan §9) — optional ---
+  latest_uv_generate_run_id?: string | null;
+  uv_generate_runs?: string[];
+  selected_uv_model?: string | null;
+  selected_uv_summary?: string | null;
+  // UV-boundary fallback (revision plan §3.1): pointer to the most recent
+  // accepted derived seam spec. Never overwrites `active_user_seam_spec`.
+  latest_derived_seam_spec?: string | null;
+  // --- MVP 5 production export extension (plan §2) — optional ---
+  latest_export_id?: string | null;
+  exports?: string[];
+  history?: string | null;
+  ai_review_skipped?: boolean;
 }
 
 export interface MeshObjectSummary {
@@ -210,6 +270,79 @@ export interface RendererApi {
   }>;
   runGet(input: { projectId: string; runId: string }): Promise<RunView>;
   runList(projectId: string): Promise<string[]>;
+  // --- MVP 1 UV review (plan §5 IPC API) ---
+  uvInspectLayers(input: { projectId: string; modelPath?: string }): Promise<InspectUvResult>;
+  uvSetActiveLayer(input: {
+    projectId: string;
+    objectName: string;
+    uvLayer: string;
+  }): Promise<{ status: string; selected_uv_layer: string }>;
+  uvReviewExisting(input: {
+    projectId: string;
+    objectName: string;
+    uvLayer: string;
+    options?: ReviewOptions;
+  }): Promise<{ run_id: string }>;
+  uvGetReviewRun(input: { projectId: string; runId: string }): Promise<UvReviewRunView>;
+  // --- MVP 2 seam editor (plan §11 Session D IPC API) ---
+  seamExportEdgeGeometry(input: {
+    projectId: string;
+    objectName: string;
+  }): Promise<{ run_id: string }>;
+  seamExtractUvBoundary(input: {
+    projectId: string;
+    objectName: string;
+    uvLayer?: string;
+  }): Promise<{ run_id: string }>;
+  seamGetEditorRun(input: { projectId: string; runId: string }): Promise<SeamEditorRunView>;
+  seamLoadSpec(input: {
+    projectId: string;
+    path?: string;
+    objectName: string;
+    edgeCount?: number | null;
+  }): Promise<{ spec: SeamSpec | null; validation: SeamValidation | null; path: string | null }>;
+  seamValidateSpec(input: {
+    projectId: string;
+    spec: SeamSpec;
+    objectName: string;
+    edgeCount?: number | null;
+  }): Promise<SeamValidation>;
+  seamSaveSpec(input: {
+    projectId: string;
+    spec: SeamSpec;
+    objectName: string;
+    edgeCount?: number | null;
+  }): Promise<{ status: string; path: string; validation: SeamValidation }>;
+  // --- MVP 3 generate + optimize (plan §11 Session E IPC API) ---
+  uvGenerateValidateInput(input: { projectId: string }): Promise<ValidateGenerateInput>;
+  uvGenerateStart(input: {
+    projectId: string;
+    objectName?: string;
+    options?: GenerateUvOptions;
+  }): Promise<{ run_id: string }>;
+  uvGenerateCancel(input: { projectId: string; runId: string }): Promise<{ status: string }>;
+  uvGenerateGetRun(input: { projectId: string; runId: string }): Promise<UvGenerateRunView>;
+  uvGenerateGetCandidateSummary(input: {
+    projectId: string;
+    runId: string;
+  }): Promise<CandidateSummary | null>;
+  // --- MVP 5 production export (plan §12 Session E IPC API) ---
+  exportCheckReadiness(input: { projectId: string }): Promise<ExportReadiness>;
+  exportStart(input: {
+    projectId: string;
+    formats: string[];
+    options?: ExportOptions;
+  }): Promise<StartExportResult>;
+  exportCancel(input: { projectId: string; exportId: string }): Promise<{ status: string }>;
+  exportGetRun(input: { projectId: string; exportId: string }): Promise<ExportRunView>;
+  exportListHistory(input: { projectId: string }): Promise<HistoryEvent[]>;
+  exportListRollbackTargets(input: { projectId: string }): Promise<ListRollbackTargetsResult>;
+  exportRollback(input: {
+    projectId: string;
+    targetType: RollbackTargetType;
+    targetId: string;
+  }): Promise<RollbackResult>;
+  exportRevealFile(input: { projectId: string; exportId: string; key: string }): Promise<boolean>;
   settingsGet(): Promise<AppSettings>;
   settingsSet(patch: Partial<AppSettings>): Promise<AppSettings>;
   pickFile(): Promise<string | null>;

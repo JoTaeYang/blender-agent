@@ -15,6 +15,31 @@ import {
   type RunStatusDoc,
   type Summary,
   type RunView,
+  type UvReviewRunView,
+  type UvReviewStatusDoc,
+  type UvReviewSummary,
+  type EdgeGeometry,
+  type ExportEdgeGeometryResult,
+  type ExtractUvBoundaryResult,
+  type SeamEditorRunView,
+  type SeamEditorStatusDoc,
+  type CandidateSummary,
+  type UvGenerateRunView,
+  type UvGenerateStatusDoc,
+  type UvGenerateSummary,
+  type ExportStatusDoc,
+  type ExportManifest,
+  type ExportMetrics,
+  type ExportResult,
+  type ValidationReport,
+  type ExportRunView,
+  type HistoryEvent,
+  type ProjectHistory,
+  type RollbackTarget,
+  type RollbackTargetType,
+  type ListRollbackTargetsResult,
+  type RollbackResult,
+  SUPPORTED_EXPORT_FORMATS,
 } from '@shared/contracts';
 
 function nowIso(): string {
@@ -204,4 +229,568 @@ export function approveLowpoly(projectDir: string, runId: string): {
     working_model_fbx: workFbxRel,
     approved_lowpoly_run_id: runId,
   };
+}
+
+// ===========================================================================
+// MVP 1 — UV review (plan §2, §9)
+// ===========================================================================
+
+export function newReviewRunId(): string {
+  return `review_run_${randomUUID()}`;
+}
+
+/**
+ * The model the UV review reads, with both absolute and project-relative forms
+ * (plan §2 input resolution). Preference order: approved working model (.blend)
+ * -> working FBX -> raw source. The relative form is recorded in the summary so
+ * the renderer never sees absolute paths (plan §4 normalized JSON).
+ */
+export function resolveWorkingModel(project: Project): { abs: string; rel: string } {
+  if (!project.dir) throw new Error('project has no directory');
+  const candidates = [project.working_model, project.working_model_fbx, project.source_model];
+  for (const rel of candidates) {
+    if (rel && existsSync(join(project.dir, rel))) {
+      return { abs: join(project.dir, rel), rel };
+    }
+  }
+  throw new Error('project has no readable working model, working FBX, or source model');
+}
+
+/** Append a review run to the manifest and point `latest_uv_review_run_id` at it. */
+export function registerReviewRun(projectDir: string, runId: string): Project {
+  const project = readProject(projectDir);
+  const runs = project.uv_review_runs ?? [];
+  if (!runs.includes(runId)) runs.push(runId);
+  project.uv_review_runs = runs;
+  project.latest_uv_review_run_id = runId;
+  return writeProject(projectDir, project);
+}
+
+/**
+ * Persist the user's UV layer choice on the manifest (plan §5.3). Read-only with
+ * respect to the model: only `project.json` changes, never the mesh/UVs.
+ */
+export function setSelectedUvLayer(
+  projectDir: string,
+  objectName: string,
+  uvLayer: string,
+): { status: string; selected_uv_layer: string } {
+  const project = readProject(projectDir);
+  project.selected_object = objectName;
+  project.selected_uv_layer = uvLayer;
+  writeProject(projectDir, project);
+  return { status: 'accepted', selected_uv_layer: uvLayer };
+}
+
+/** Assemble the combined review-run view the renderer polls (plan §9). */
+export function getUvReviewRunView(projectDir: string, runId: string): UvReviewRunView {
+  const dir = runDir(projectDir, runId);
+  const status = readJsonIfExists<UvReviewStatusDoc>(join(dir, 'status.json'));
+  const summary = readJsonIfExists<UvReviewSummary>(join(dir, 'uv_review_summary.json'));
+
+  // Turn run-relative artifact filenames into absolute paths for `uvpreview://`.
+  const artifact_paths: Record<string, string> = {};
+  const artifacts = summary?.artifacts ?? (status?.artifacts as Record<string, string> | undefined);
+  if (artifacts) {
+    for (const [key, filename] of Object.entries(artifacts)) {
+      if (typeof filename === 'string') {
+        const abs = join(dir, filename);
+        if (existsSync(abs)) artifact_paths[key] = abs;
+      }
+    }
+  }
+
+  return {
+    run_id: runId,
+    dir,
+    status,
+    summary,
+    stdout: readTextIfExists(join(dir, 'stdout.log')),
+    stderr: readTextIfExists(join(dir, 'stderr.log')),
+    artifact_paths,
+  };
+}
+
+// ===========================================================================
+// MVP 2 — seam editor (plan §2, §9)
+// ===========================================================================
+
+export function newSeamRunId(): string {
+  return `seam_run_${randomUUID()}`;
+}
+
+/** `<dir>/work/seams`, created on demand — where canonical specs live (plan §2). */
+export function seamsDir(projectDir: string): string {
+  const dir = join(projectDir, 'work', 'seams');
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/** Append a seam-editor run and point `latest_seam_editor_run_id` at it (plan §9). */
+export function registerSeamEditorRun(projectDir: string, runId: string): Project {
+  const project = readProject(projectDir);
+  const runs = project.seam_editor_runs ?? [];
+  if (!runs.includes(runId)) runs.push(runId);
+  project.seam_editor_runs = runs;
+  project.latest_seam_editor_run_id = runId;
+  return writeProject(projectDir, project);
+}
+
+/**
+ * Record the active user seam spec for the MVP 3 handoff (plan §9, §10). The
+ * spec path is stored project-relative so the manifest never leaks an absolute
+ * path. Persists the selected object too so MVP 3 has model + object + spec.
+ */
+export function setActiveUserSeamSpec(
+  projectDir: string,
+  specRel: string,
+  objectName?: string,
+): Project {
+  const project = readProject(projectDir);
+  project.active_user_seam_spec = specRel;
+  if (objectName) project.selected_object = objectName;
+  return writeProject(projectDir, project);
+}
+
+/** Assemble the combined seam-editor-run view the renderer polls (plan §9). */
+export function getSeamEditorRunView(projectDir: string, runId: string): SeamEditorRunView {
+  const dir = runDir(projectDir, runId);
+  return {
+    run_id: runId,
+    dir,
+    status: readJsonIfExists<SeamEditorStatusDoc>(join(dir, 'status.json')),
+    edge_geometry: readJsonIfExists<EdgeGeometry>(join(dir, 'edge_geometry.json')),
+    export_result: readJsonIfExists<ExportEdgeGeometryResult>(join(dir, 'export_result.json')),
+    boundary: readJsonIfExists<ExtractUvBoundaryResult>(join(dir, 'boundary_extract_report.json')),
+    stdout: readTextIfExists(join(dir, 'stdout.log')),
+    stderr: readTextIfExists(join(dir, 'stderr.log')),
+  };
+}
+
+// ===========================================================================
+// MVP 3 — generate + optimize (plan §2, §9)
+// ===========================================================================
+
+/** Project-relative handoff paths for the accepted selected UV (plan §2, §9). */
+export const SELECTED_UV_BLEND_REL = join('work', 'uv', 'selected_uv.blend');
+export const SELECTED_UV_SUMMARY_REL = join('work', 'uv', 'selected_uv_summary.json');
+/** Where the worker writes a UV-boundary-derived seam spec (revision plan §3.1). */
+export const DERIVED_SEAM_SPEC_REL = join('work', 'seams', 'derived_from_uv_boundary.json');
+
+export function newUvGenerateRunId(): string {
+  return `uv_run_${randomUUID()}`;
+}
+
+/** `<dir>/work/uv`, created on demand — where the selected UV blend lives (plan §2). */
+export function uvWorkDir(projectDir: string): string {
+  const dir = join(projectDir, 'work', 'uv');
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/** Append a generate run and point `latest_uv_generate_run_id` at it (plan §9). */
+export function registerUvGenerateRun(projectDir: string, runId: string): Project {
+  const project = readProject(projectDir);
+  const runs = project.uv_generate_runs ?? [];
+  if (!runs.includes(runId)) runs.push(runId);
+  project.uv_generate_runs = runs;
+  project.latest_uv_generate_run_id = runId;
+  return writeProject(projectDir, project);
+}
+
+/**
+ * Record the selected UV model + summary for the MVP 4/5 handoff (plan §9). Only
+ * called for an ACCEPTED run — a `needs_user_review`/`failed` run never updates
+ * these pointers, so the last good selected UV is preserved (plan §6).
+ */
+export function setSelectedUvModel(
+  projectDir: string,
+  input: { selectedUvModel?: string | null; selectedUvSummary?: string | null } = {},
+): Project {
+  const project = readProject(projectDir);
+  project.selected_uv_model = input.selectedUvModel ?? SELECTED_UV_BLEND_REL;
+  project.selected_uv_summary = input.selectedUvSummary ?? SELECTED_UV_SUMMARY_REL;
+  return writeProject(projectDir, project);
+}
+
+/**
+ * Record the pointer to a UV-boundary-derived seam spec (revision plan §3.1,
+ * §4.4). This is informational only — it NEVER overwrites `active_user_seam_spec`
+ * (the MVP 2 editor output stays the explicit source of truth, revision plan §2.3).
+ */
+export function setLatestDerivedSeamSpec(projectDir: string, specRel: string): Project {
+  const project = readProject(projectDir);
+  project.latest_derived_seam_spec = specRel;
+  return writeProject(projectDir, project);
+}
+
+/**
+ * Read the accepted run's status and, if it shipped, record the selected UV
+ * pointers on the manifest (plan §9). Returns the terminal status string (or
+ * null if no status yet) so the runner can decide whether to broadcast a change.
+ */
+export function recordUvGenerateOutcome(projectDir: string, runId: string): string | null {
+  const dir = runDir(projectDir, runId);
+  const status = readJsonIfExists<UvGenerateStatusDoc>(join(dir, 'status.json'));
+  if (!status) return null;
+  if (status.status === 'accepted') {
+    const summary = readJsonIfExists<UvGenerateSummary>(join(dir, 'uv_generate_summary.json'));
+    if (summary?.selected_uv_model) {
+      setSelectedUvModel(projectDir, {
+        selectedUvModel: summary.selected_uv_model,
+        selectedUvSummary: SELECTED_UV_SUMMARY_REL,
+      });
+    }
+    // A derived run records its derived-spec pointer, but never replaces the
+    // explicit `active_user_seam_spec` (revision plan §4.4).
+    if (summary?.seam_source?.derived && summary.seam_source.path) {
+      setLatestDerivedSeamSpec(projectDir, summary.seam_source.path);
+    }
+  }
+  return status.status;
+}
+
+/** Assemble the combined generate-run view the renderer polls (plan §9, §4.1). */
+export function getUvGenerateRunView(projectDir: string, runId: string): UvGenerateRunView {
+  const dir = runDir(projectDir, runId);
+  const status = readJsonIfExists<UvGenerateStatusDoc>(join(dir, 'status.json'));
+  const summary = readJsonIfExists<UvGenerateSummary>(join(dir, 'uv_generate_summary.json'));
+
+  // Turn run-relative artifact filenames into absolute paths for `uvpreview://`.
+  const artifact_paths: Record<string, string> = {};
+  const artifacts = summary?.artifacts ?? (status?.artifacts as Record<string, string> | undefined);
+  if (artifacts) {
+    for (const [key, filename] of Object.entries(artifacts)) {
+      if (typeof filename === 'string') {
+        const abs = join(dir, filename);
+        if (existsSync(abs)) artifact_paths[key] = abs;
+      }
+    }
+  }
+
+  return {
+    run_id: runId,
+    dir,
+    status,
+    summary,
+    candidate_summary: readJsonIfExists<CandidateSummary>(join(dir, 'candidate_summary.json')),
+    p5_gate: readJsonIfExists<Record<string, unknown>>(join(dir, 'p5_gate.json')),
+    seam_report: readJsonIfExists<Record<string, unknown>>(join(dir, 'seam_report.json')),
+    stdout: readTextIfExists(join(dir, 'stdout.log')),
+    stderr: readTextIfExists(join(dir, 'stderr.log')),
+    artifact_paths,
+  };
+}
+
+/** The candidate table source (plan §5) — `candidate_summary.json` or null. */
+export function getCandidateSummary(projectDir: string, runId: string): CandidateSummary | null {
+  return readJsonIfExists<CandidateSummary>(join(runDir(projectDir, runId), 'candidate_summary.json'));
+}
+
+// ===========================================================================
+// MVP 5 — production export, history, rollback (plan §2, §6, §8, §9)
+// ===========================================================================
+
+/** Project-relative history file (plan §2, §8). */
+export const HISTORY_REL = join('history', 'project_history.json');
+
+export function newExportId(): string {
+  return `export_${randomUUID()}`;
+}
+
+export function newHistoryEventId(): string {
+  return `event_${randomUUID()}`;
+}
+
+/** `<dir>/exports`, where each export gets an immutable `<export_id>/` folder (plan §2). */
+export function exportsRoot(projectDir: string): string {
+  return join(projectDir, 'exports');
+}
+
+export function exportDir(projectDir: string, exportId: string): string {
+  return join(exportsRoot(projectDir), exportId);
+}
+
+export function ensureExportDir(projectDir: string, exportId: string): string {
+  const dir = exportDir(projectDir, exportId);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+export function historyPath(projectDir: string): string {
+  return join(projectDir, HISTORY_REL);
+}
+
+/** Read `project_history.json`, or an empty-but-valid history when absent (plan §8). */
+export function readHistory(projectDir: string): ProjectHistory {
+  const h = readJsonIfExists<ProjectHistory>(historyPath(projectDir));
+  if (h && Array.isArray(h.events)) return h;
+  return { schema_version: SCHEMA_VERSION, events: [] };
+}
+
+/**
+ * Append an event to the project history (plan §8 — append-only). Never rewrites
+ * or deletes prior events; points `project.history` at the file the first time.
+ */
+export function appendHistoryEvent(projectDir: string, event: HistoryEvent): ProjectHistory {
+  mkdirSync(join(projectDir, 'history'), { recursive: true });
+  const history = readHistory(projectDir);
+  history.events.push(event);
+  writeFileSync(historyPath(projectDir), JSON.stringify(history, null, 2));
+  const project = readProject(projectDir);
+  if (project.history !== HISTORY_REL) {
+    project.history = HISTORY_REL;
+    writeProject(projectDir, project);
+  }
+  return history;
+}
+
+/** Append an export to the manifest's `exports` list (plan §2). Records the MVP 4 skip. */
+export function registerExport(projectDir: string, exportId: string): Project {
+  const project = readProject(projectDir);
+  const exports = project.exports ?? [];
+  if (!exports.includes(exportId)) exports.push(exportId);
+  project.exports = exports;
+  project.ai_review_skipped = true; // MVP 4 AI Review is skipped (plan §0)
+  return writeProject(projectDir, project);
+}
+
+function pickExportMetrics(metrics: Record<string, unknown> | undefined | null): ExportMetrics {
+  const out: ExportMetrics = {};
+  if (!metrics) return out;
+  for (const k of [
+    'stretch_score',
+    'worst_island_distortion',
+    'raster_overlap_ratio',
+    'texel_density_variance',
+    'packing_efficiency',
+  ] as const) {
+    const v = metrics[k];
+    if (typeof v === 'number') out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Read an export's status + manifest and, when it shipped (accepted/partial),
+ * pin `latest_export_id` and append an `export_created` history event; a failed
+ * export appends `export_failed` (plan §6, §8). Returns the terminal status (or
+ * null if no status yet). Never deletes prior exports (plan §9, §15).
+ */
+export function recordExportOutcome(projectDir: string, exportId: string): string | null {
+  const dir = exportDir(projectDir, exportId);
+  const status = readJsonIfExists<ExportStatusDoc>(join(dir, 'status.json'));
+  if (!status) return null;
+  const manifest = readJsonIfExists<ExportManifest>(join(dir, 'export_manifest.json'));
+  const result = readJsonIfExists<ExportResult>(join(dir, 'export_result.json'));
+  const shipped = status.status === 'accepted' || status.status === 'partial';
+
+  if (shipped && manifest) {
+    const project = readProject(projectDir);
+    project.latest_export_id = exportId;
+    project.ai_review_skipped = true;
+    writeProject(projectDir, project);
+    appendHistoryEvent(projectDir, {
+      id: newHistoryEventId(),
+      type: 'export_created',
+      created_at: nowIso(),
+      export_id: exportId,
+      uv_generate_run_id: manifest.source?.uv_generate_run_id ?? null,
+      selected_candidate_id: result?.source?.selected_candidate_id ?? null,
+      seam_spec: manifest.source?.active_user_seam_spec ?? null,
+      manifest: join('exports', exportId, 'export_manifest.json'),
+      summary: {
+        formats: manifest.formats ?? [],
+        status: manifest.status,
+        raster_overlap_ratio: manifest.metrics?.raster_overlap_ratio,
+        packing_efficiency: manifest.metrics?.packing_efficiency,
+      },
+    });
+  } else if (status.status === 'failed') {
+    appendHistoryEvent(projectDir, {
+      id: newHistoryEventId(),
+      type: 'export_failed',
+      created_at: nowIso(),
+      export_id: exportId,
+      uv_generate_run_id: result?.source?.uv_generate_run_id ?? null,
+      selected_candidate_id: result?.source?.selected_candidate_id ?? null,
+      manifest: '',
+      summary: {
+        formats: result?.exports ? Object.keys(result.exports) : [],
+        status: 'failed',
+      },
+    });
+  }
+  return status.status;
+}
+
+/** Assemble the combined export-run view the renderer polls (plan §10). */
+export function getExportRunView(projectDir: string, exportId: string): ExportRunView {
+  const dir = exportDir(projectDir, exportId);
+  const status = readJsonIfExists<ExportStatusDoc>(join(dir, 'status.json'));
+  const manifest = readJsonIfExists<ExportManifest>(join(dir, 'export_manifest.json'));
+  const validation = readJsonIfExists<ValidationReport>(join(dir, 'validation_report.json'));
+  const result = readJsonIfExists<ExportResult>(join(dir, 'export_result.json'));
+
+  // Split the manifest `files` map into renderable previews vs exported models.
+  const artifact_paths: Record<string, string> = {};
+  const file_paths: Record<string, string> = {};
+  const formats = SUPPORTED_EXPORT_FORMATS as readonly string[];
+  for (const [key, filename] of Object.entries(manifest?.files ?? {})) {
+    if (typeof filename !== 'string') continue;
+    const abs = join(dir, filename);
+    if (!existsSync(abs)) continue;
+    if (formats.includes(key)) file_paths[key] = abs;
+    else artifact_paths[key] = abs; // uv_layout / checker_front / checker_side
+  }
+  for (const f of ['export_manifest.json', 'validation_report.json']) {
+    const abs = join(dir, f);
+    if (existsSync(abs)) artifact_paths[f.replace('.json', '')] = abs;
+  }
+
+  return {
+    export_id: exportId,
+    dir,
+    status,
+    manifest,
+    validation,
+    result,
+    stdout: readTextIfExists(join(dir, 'stdout.log')),
+    stderr: readTextIfExists(join(dir, 'stderr.log')),
+    artifact_paths,
+    file_paths,
+  };
+}
+
+export function listExports(projectDir: string): string[] {
+  const root = exportsRoot(projectDir);
+  if (!existsSync(root)) return [];
+  return readdirSync(root, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => d.name);
+}
+
+/** List rollback targets: accepted UV runs + prior exports, newest first (plan §9.1). */
+export function listRollbackTargets(projectDir: string): ListRollbackTargetsResult {
+  const project = readProject(projectDir);
+  const targets: RollbackTarget[] = [];
+
+  for (const runId of (project.uv_generate_runs ?? []).slice().reverse()) {
+    const rdir = runDir(projectDir, runId);
+    const summary = readJsonIfExists<UvGenerateSummary>(join(rdir, 'uv_generate_summary.json'));
+    if (summary?.status !== 'accepted') continue; // only accepted UV runs can be restored
+    const status = readJsonIfExists<UvGenerateStatusDoc>(join(rdir, 'status.json'));
+    const runBlendRel = join('runs', runId, 'selected_uv.blend');
+    targets.push({
+      id: runId,
+      type: 'uv_run',
+      created_at: status?.finished_at ?? status?.started_at ?? null,
+      selected_uv_model: existsSync(join(projectDir, runBlendRel))
+        ? runBlendRel
+        : summary?.selected_uv_model ?? null,
+      selected_candidate_id: summary?.selected_candidate_id ?? null,
+      metrics: pickExportMetrics(summary?.metrics as Record<string, unknown> | undefined),
+    });
+  }
+
+  for (const exportId of (project.exports ?? []).slice().reverse()) {
+    const manifest = readJsonIfExists<ExportManifest>(
+      join(exportDir(projectDir, exportId), 'export_manifest.json'),
+    );
+    if (!manifest) continue;
+    targets.push({
+      id: exportId,
+      type: 'export',
+      created_at: manifest.created_at ?? null,
+      manifest: join('exports', exportId, 'export_manifest.json'),
+      formats: manifest.formats ?? [],
+      status: manifest.status,
+    });
+  }
+
+  return { schema_version: SCHEMA_VERSION, status: 'accepted', targets };
+}
+
+/**
+ * Roll the project state back to a previous UV run or export (plan §9.2).
+ *
+ * Rollback updates project pointers only; it copies a UV run's immutable
+ * `selected_uv.blend`/summary back into `work/uv/` (does not mutate the run), and
+ * for an export just re-pins `latest_export_id`. Newer exports/runs are never
+ * deleted, and a `rollback_performed` event is appended (plan §9 rules, §15).
+ */
+export function rollbackProjectState(
+  projectDir: string,
+  input: { targetType: RollbackTargetType; targetId: string },
+): RollbackResult {
+  const { targetType, targetId } = input;
+  const eventId = newHistoryEventId();
+
+  if (targetType === 'uv_run') {
+    const rdir = runDir(projectDir, targetId);
+    const srcBlend = join(rdir, 'selected_uv.blend');
+    if (!existsSync(srcBlend)) {
+      throw new Error(`uv run ${targetId} has no selected_uv.blend to roll back to`);
+    }
+    uvWorkDir(projectDir);
+    copyFileSync(srcBlend, join(projectDir, SELECTED_UV_BLEND_REL));
+    const srcSummary = join(rdir, 'uv_generate_summary.json');
+    if (existsSync(srcSummary)) {
+      const summary = JSON.parse(readFileSync(srcSummary, 'utf-8'));
+      writeFileSync(
+        join(projectDir, SELECTED_UV_SUMMARY_REL),
+        JSON.stringify({ ...summary, source_run_id: targetId }, null, 2),
+      );
+    }
+    const project = readProject(projectDir);
+    project.selected_uv_model = SELECTED_UV_BLEND_REL;
+    project.selected_uv_summary = SELECTED_UV_SUMMARY_REL;
+    project.latest_uv_generate_run_id = targetId;
+    writeProject(projectDir, project);
+    appendHistoryEvent(projectDir, {
+      id: eventId,
+      type: 'rollback_performed',
+      created_at: nowIso(),
+      target_type: 'uv_run',
+      target_id: targetId,
+      selected_uv_model: SELECTED_UV_BLEND_REL,
+      selected_uv_summary: SELECTED_UV_SUMMARY_REL,
+    });
+    return {
+      schema_version: SCHEMA_VERSION,
+      status: 'accepted',
+      rolled_back_to: {
+        type: 'uv_run',
+        id: targetId,
+        selected_uv_model: SELECTED_UV_BLEND_REL,
+        selected_uv_summary: SELECTED_UV_SUMMARY_REL,
+      },
+      history_event: eventId,
+    };
+  }
+
+  if (targetType === 'export') {
+    const edir = exportDir(projectDir, targetId);
+    if (!existsSync(join(edir, 'export_manifest.json'))) {
+      throw new Error(`export ${targetId} has no manifest to roll back to`);
+    }
+    const project = readProject(projectDir);
+    project.latest_export_id = targetId; // re-pin; newer exports are NOT deleted (plan §9)
+    writeProject(projectDir, project);
+    appendHistoryEvent(projectDir, {
+      id: eventId,
+      type: 'rollback_performed',
+      created_at: nowIso(),
+      target_type: 'export',
+      target_id: targetId,
+    });
+    return {
+      schema_version: SCHEMA_VERSION,
+      status: 'accepted',
+      rolled_back_to: { type: 'export', id: targetId, latest_export_id: targetId },
+      history_event: eventId,
+    };
+  }
+
+  throw new Error(`unknown rollback target type: ${targetType}`);
 }

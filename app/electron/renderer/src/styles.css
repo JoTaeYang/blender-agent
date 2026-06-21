@@ -26,8 +26,15 @@ body {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line);
 }
-.brand { font-weight: 600; margin-right: 12px; }
+.brand { font-weight: 600; margin-right: 8px; white-space: nowrap; }
 .topbar .busy { margin-left: auto; color: var(--muted); }
+.langselect {
+  margin-left: 12px;
+  background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer;
+}
+.langselect:hover { border-color: var(--accent); }
+.langselect option { background: var(--panel); color: var(--text); }
 
 button {
   background: var(--panel2); color: var(--text); border: 1px solid var(--line);
@@ -112,3 +119,228 @@ table.metrics td:last-child { text-align: right; font-variant-numeric: tabular-n
 pre.json, .logs pre { font-family: 'SF Mono', Menlo, monospace; font-size: 11px; margin: 0; white-space: pre-wrap; word-break: break-word; }
 .logs { display: flex; gap: 12px; }
 .logcol { flex: 1; min-width: 0; }
+
+/* --- MVP 1 UV review --------------------------------------------------- */
+.modetabs {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  margin-left: 8px;
+  min-width: 0;
+}
+.modetabs button {
+  position: relative;
+  display: grid;
+  grid-template-columns: 18px minmax(72px, 1fr);
+  grid-template-areas:
+    "num label"
+    "num state";
+  column-gap: 6px;
+  align-items: center;
+  min-width: 118px;
+  max-width: 166px;
+  padding: 5px 10px;
+  border-radius: 0;
+  border-left-width: 0;
+  text-align: left;
+}
+.modetabs button:first-child {
+  border-left-width: 1px;
+  border-radius: 6px 0 0 6px;
+}
+.modetabs button:last-child { border-radius: 0 6px 6px 0; }
+.modetabs button::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: -6px;
+  z-index: 1;
+  width: 10px;
+  height: 10px;
+  background: var(--panel2);
+  border-top: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  transform: translateY(-50%) rotate(45deg);
+}
+.modetabs button:last-child::after { display: none; }
+.modetabs button.active {
+  background: #26344d;
+  border-color: var(--accent);
+  color: #fff;
+}
+.modetabs button.active::after { background: #26344d; border-color: var(--accent); }
+.modetabs button.done .stepno { background: #2f4a35; color: var(--ok); }
+.modetabs button.ready .stepno { background: #243b66; color: #b9ccff; }
+.modetabs button.blocked { color: var(--muted); }
+.modetabs button.blocked .stepno { background: var(--line); color: var(--muted); }
+.stepno {
+  grid-area: num;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.steplabel {
+  grid-area: label;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.stepstate {
+  grid-area: state;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 10px;
+}
+.modetabs button.active .stepstate { color: #c8d6ff; }
+
+@media (max-width: 1120px) {
+  .topbar { flex-wrap: wrap; }
+  .topbar .busy { margin-left: 0; }
+  .modetabs { order: 2; flex-basis: 100%; margin-left: 0; }
+  .modetabs button { flex: 1; max-width: none; min-width: 0; }
+}
+
+.subtoolbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px; background: var(--panel2); border-bottom: 1px solid var(--line);
+}
+.subtoolbar-hint { margin-left: auto; }
+
+.uv-center { flex-direction: column; }
+.uv-tabs { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; width: 100%; }
+.uv-tabbody { flex: 1; min-height: 0; display: flex; }
+.uv-tabs .tabbar { padding: 6px 8px 0; }
+
+.checker-wrap { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.viewtoggle { display: flex; gap: 4px; padding: 8px; justify-content: center; }
+.viewtoggle button { text-transform: capitalize; }
+.viewtoggle button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.zoompan {
+  flex: 1; position: relative; overflow: hidden; min-height: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: #111; cursor: grab; user-select: none;
+}
+.zoompan:active { cursor: grabbing; }
+.zoompan img { max-width: 90%; max-height: 90%; object-fit: contain; transform-origin: center; image-rendering: auto; }
+.zoomctl {
+  position: absolute; bottom: 10px; right: 10px;
+  display: flex; align-items: center; gap: 4px;
+  background: rgba(0,0,0,0.5); padding: 4px 6px; border-radius: 6px;
+}
+.zoomctl button { padding: 2px 8px; }
+
+.nouv { display: flex; flex-direction: column; gap: 6px; }
+.nouv-title { font-size: 15px; color: var(--text); font-weight: 600; }
+
+.reviewbadge { padding: 6px 10px; border-radius: 6px; font-size: 12px; background: var(--line); }
+.reviewbadge.clean { background: #2f4a35; color: var(--ok); }
+.reviewbadge.has_overlap, .reviewbadge.out_of_bounds { background: #4a2f2f; color: var(--err); }
+.reviewbadge.high_stretch, .reviewbadge.density_variance { background: #3a3520; color: var(--warn); }
+.reviewbadge.no_uv, .reviewbadge.unknown { background: var(--line); color: var(--muted); }
+
+.issuelist { list-style: none; margin: 0; padding: 0; }
+.issuelist li { display: flex; align-items: baseline; gap: 6px; padding: 4px 0; font-size: 12px; border-bottom: 1px solid var(--line); }
+.sevdot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.sevdot.error { background: var(--err); }
+.sevdot.warning { background: var(--warn); }
+
+.artifactlist { list-style: none; margin: 0; padding: 0; }
+.artifactlist li { display: flex; gap: 8px; align-items: baseline; padding: 2px 0; }
+.artifactlist .akey { color: var(--accent); min-width: 110px; font-size: 12px; }
+.artifactlist code { color: var(--muted); word-break: break-all; }
+
+/* --- MVP 2 Seam Editor (plan §8) --------------------------------------- */
+.warn { color: var(--warn); }
+.seam-center { flex-direction: column; }
+.seam-edit-toolbar {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 6px 10px; border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.seam-edit-toolbar .sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
+.seam-edit-toolbar .edge-id-input { width: 150px; }
+button.mark-seam { background: #4a2f2f; border-color: #ff5a4d; color: #ffb3ac; }
+button.mark-protect { background: #283a5e; border-color: #5b8cff; color: #b9ccff; }
+
+.seam-viewport { position: relative; flex: 1; min-height: 0; background: #15161a; }
+.seam-viewport-canvas { position: absolute; inset: 0; cursor: crosshair; touch-action: none; }
+.seam-viewport-empty {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: var(--muted); font-size: 13px; text-align: center; padding: 24px; pointer-events: none;
+}
+.seam-viewport-ctl {
+  position: absolute; left: 10px; bottom: 10px; display: flex; align-items: center; gap: 8px;
+  background: rgba(20,21,26,0.8); padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line);
+}
+
+.markrow { display: flex; gap: 6px; margin-top: 6px; }
+.markrow button { flex: 1; }
+.big { font-size: 28px; font-weight: 600; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; vertical-align: middle; margin-right: 4px; }
+.dot.seam { background: #ff5a4d; }
+.dot.protect { background: #5b8cff; }
+
+.chk { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 0; cursor: pointer; }
+.chk input { margin: 0; }
+.tol { margin-top: 8px; }
+.tol input[type='range'] { width: 100%; }
+
+.draftbox { margin-top: 6px; padding: 8px; border: 1px solid #2f4a35; border-radius: 6px; background: #1f2c22; }
+.draftbox-head { font-size: 12px; margin-bottom: 4px; }
+.draftbox-actions { display: flex; gap: 6px; margin-top: 8px; }
+.draftbox-actions button { flex: 1; font-size: 11px; }
+
+/* --- MVP 3 Generate + Optimize (plan §8) ------------------------------- */
+.statuspill.needs_user_review { background: #3a3520; color: var(--warn); }
+.statuspill.cancelled { background: var(--line); color: var(--muted); }
+.reviewbadge.has_overlap { background: #4a2f2f; color: var(--err); }
+
+.placeholder.small { font-size: 12px; padding: 12px; }
+
+/* Baseline vs selected side-by-side (plan §7). */
+.beforeafter { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 8px; background: #111; }
+.beforeafter figure { margin: 0; display: flex; flex-direction: column; min-height: 0; }
+.beforeafter figcaption { font-size: 11px; color: var(--muted); text-align: center; padding: 2px 0 6px; text-transform: uppercase; letter-spacing: 0.04em; }
+.beforeafter img { flex: 1; min-height: 0; width: 100%; object-fit: contain; background: #0c0c0c; border: 1px solid var(--line); border-radius: 4px; }
+
+/* Candidate table — scrolls on narrow windows, never breaks layout (plan §11 F). */
+.candtable-wrap { flex: 1; min-height: 0; overflow: auto; padding: 8px; }
+table.candtable { width: 100%; border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+table.candtable th { position: sticky; top: 0; background: var(--panel); text-align: right; padding: 5px 7px; border-bottom: 1px solid var(--line); color: var(--muted); font-weight: 500; }
+table.candtable th:nth-child(-n+2), table.candtable td:nth-child(-n+2) { text-align: left; }
+table.candtable td { text-align: right; padding: 4px 7px; border-bottom: 1px solid var(--line); }
+table.candtable tr.sel td { background: #243524; }
+table.candtable tr.rejected td { color: var(--muted); }
+
+/* Seam integrity / metric rows that violate an acceptance gate. */
+table.metrics tr.bad td { color: var(--err); }
+
+.runopts { display: flex; flex-direction: column; gap: 6px; }
+.optrow { display: flex; align-items: center; justify-content: space-between; font-size: 12px; gap: 8px; }
+.optrow input[type='number'] { width: 64px; }
+
+/* ===== MVP 5 Export workspace (plan §10) ===== */
+.tag.bad { background: #4a2f2f; color: var(--err); }
+.optrow input[type='text'] { width: 120px; background: var(--panel2); border: 1px solid var(--line); color: var(--fg); border-radius: 4px; padding: 2px 6px; }
+
+/* Format checkboxes (FBX / OBJ / GLB / GLTF). */
+.formatrow { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+.fmtchip { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 3px 8px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel2); cursor: pointer; user-select: none; }
+.fmtchip.on { border-color: var(--accent); background: #243524; color: var(--ok); }
+.fmtchip input { margin: 0; }
+
+/* Export history timeline + rollback target list. */
+.list.history li, .list.rollback li { display: block; padding: 6px 8px; }
+.list.rollback li button, .list.history li button { margin-top: 4px; font-size: 11px; }
+.issuelist.inline { margin-top: 4px; }
+.artifactlist { flex: 1; min-height: 0; overflow: auto; padding: 8px; }
