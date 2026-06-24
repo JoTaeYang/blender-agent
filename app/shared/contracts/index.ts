@@ -90,6 +90,7 @@ export const Ipc = {
   SettingsSet: 'settings:set',
   PickFile: 'dialog:pickFile',
   PickProjectDir: 'dialog:pickProjectDir',
+  PickBlender: 'dialog:pickBlender',
   // main -> renderer push event
   RunUpdate: 'run:update',
 } as const;
@@ -347,5 +348,8 @@ export interface RendererApi {
   settingsSet(patch: Partial<AppSettings>): Promise<AppSettings>;
   pickFile(): Promise<string | null>;
   pickProjectDir(): Promise<string | null>;
+  /** Native file dialog to pick the Blender executable (OS-aware; resolves a
+   *  macOS Blender.app to its inner binary). Returns null if cancelled. */
+  pickBlender(): Promise<string | null>;
   onRunUpdate(cb: (payload: { projectId: string; runId: string }) => void): () => void;
 }

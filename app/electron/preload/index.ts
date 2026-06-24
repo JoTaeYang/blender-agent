@@ -44,6 +44,7 @@ const api: RendererApi = {
   settingsSet: (patch) => ipcRenderer.invoke(Ipc.SettingsSet, patch),
   pickFile: () => ipcRenderer.invoke(Ipc.PickFile),
   pickProjectDir: () => ipcRenderer.invoke(Ipc.PickProjectDir),
+  pickBlender: () => ipcRenderer.invoke(Ipc.PickBlender),
   onRunUpdate: (cb) => {
     const listener = (_e: unknown, payload: { projectId: string; runId: string }) => cb(payload);
     ipcRenderer.on(Ipc.RunUpdate, listener);

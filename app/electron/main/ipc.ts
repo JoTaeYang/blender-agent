@@ -166,6 +166,28 @@ export function registerIpc(): void {
     return res.canceled ? null : res.filePaths[0];
   });
 
+  // Pick the Blender executable with OS-aware filters. On macOS the user selects
+  // `Blender.app`; we resolve it to the inner CLI binary the worker actually spawns.
+  ipcMain.handle(Ipc.PickBlender, async () => {
+    const filters =
+      process.platform === 'win32'
+        ? [{ name: 'Blender', extensions: ['exe'] }]
+        : process.platform === 'darwin'
+          ? [{ name: 'Blender', extensions: ['app'] }]
+          : [{ name: 'All files', extensions: ['*'] }];
+    const res = await dialog.showOpenDialog({
+      title: 'Select the Blender executable',
+      properties: ['openFile'],
+      filters,
+    });
+    if (res.canceled || !res.filePaths[0]) return null;
+    let p = res.filePaths[0];
+    if (process.platform === 'darwin' && p.endsWith('.app')) {
+      p = join(p, 'Contents', 'MacOS', 'Blender');
+    }
+    return p;
+  });
+
   ipcMain.handle(Ipc.ProjectCreate, (_e, input: { name: string; sourcePath: string; role?: MeshRole }) => {
     const settings = getSettings();
     const root = settings.projectsRoot ?? process.cwd();

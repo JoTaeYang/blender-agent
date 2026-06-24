@@ -195,9 +195,11 @@ function SettingsBar(props: {
 }): JSX.Element {
   const { settings, t } = props;
   const setBlender = async () => {
-    const path = window.prompt(t('app.settingsPrompt'), settings.blenderPath ?? '');
-    if (path === null) return;
-    const next = await window.api.settingsSet({ blenderPath: path || null });
+    // Native file picker (OS-aware) instead of typing a long path — especially on
+    // Windows. Cancelling leaves the current path unchanged.
+    const picked = await window.api.pickBlender();
+    if (!picked) return;
+    const next = await window.api.settingsSet({ blenderPath: picked });
     props.onChange(next);
   };
   return (
