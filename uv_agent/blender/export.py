@@ -81,6 +81,14 @@ def set_active_uv_layer(obj, layer_name: str | None) -> tuple[str | None, list[s
     Returns ``(active_uv_layer_name, warnings)``. A requested-but-missing layer is
     a warning, not a failure — the object's existing active layer still exports
     (plan §7 tolerance). Returns ``(None, [...])`` when the object has no UVs.
+
+    CRITICAL: the OBJ exporter (and glTF's primary TEXCOORD_0) writes the UV map
+    flagged ``active_render``, NOT ``uv_layers.active``. So we ALWAYS mark the
+    active layer as ``active_render`` here — even on the keep-active (``None``)
+    path. Otherwise an asset that still carries a leftover original UV layer flagged
+    for render (e.g. the source ``UVChannel_1`` next to the optimized ``AI_UV``)
+    silently ships the WRONG, un-optimized UVs while the manifest/preview report the
+    active one (MVP3 existing-UV repack follow-up — preview ≠ exported OBJ bug).
     """
     warnings: list[str] = []
     uv_layers = obj.data.uv_layers
@@ -95,11 +103,14 @@ def set_active_uv_layer(obj, layer_name: str | None) -> tuple[str | None, list[s
                 f"exporting active layer {uv_layers.active.name!r}")
         else:
             uv_layers.active = layer
-            try:
-                layer.active_render = True
-            except (AttributeError, RuntimeError):  # pragma: no cover - Blender build dependent
-                pass
     active = uv_layers.active
+    # Sync render layer with the active layer so the exporter writes exactly the UV
+    # we activated / previewed (see the CRITICAL note above).
+    if active is not None:
+        try:
+            active.active_render = True
+        except (AttributeError, RuntimeError):  # pragma: no cover - Blender build dependent
+            pass
     return (active.name if active is not None else None), warnings
 
 

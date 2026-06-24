@@ -210,10 +210,22 @@ def _resolve_seam_source(contract, job: dict, obj) -> dict:
         seam_source = contract.build_seam_source(
             source_type=contract.SEAM_SOURCE_UV_BOUNDARY, path=path, uv_layer=resolved_layer,
             user_confirmed=False, derived=True)
+        # Flatten the boundary report's headline fields onto the resolution block so
+        # ``seam_source_resolution.json`` is self-explanatory (MVP3 §2 Goal A completion
+        # criterion / §3 Step 2): island_count, boundary_edge_count, the extraction method,
+        # and any dropped/ambiguous edges that explain a low boundary count.
         return {"status": "ok", "spec": spec, "seam_source": seam_source, "label": path,
                 "derived_spec": derived_spec,
                 "resolution": {"policy": policy, "kind": decision["kind"],
                                "uv_layer": resolved_layer, "derived_seam_spec": path,
+                               "object_name": obj.name,
+                               "island_count": report.get("island_count"),
+                               "uv_layer_loop_count": report.get("uv_layer_loop_count"),
+                               "boundary_edge_count": report.get("boundary_edge_count"),
+                               "boundary_extraction_method": report.get("method"),
+                               "mesh_boundary_edge_count": report.get("mesh_boundary_edge_count"),
+                               "ambiguous_boundary_count": report.get("ambiguous_boundary_count"),
+                               "dropped_or_ambiguous_edges": report.get("dropped_or_ambiguous_edges", []),
                                "boundary_report": report}}
 
     # 3) Nothing to unwrap from (revision plan §1 case 3, §4.2).

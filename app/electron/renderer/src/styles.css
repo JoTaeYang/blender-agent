@@ -20,13 +20,18 @@ body {
   background: var(--bg);
 }
 
-.shell { display: flex; flex-direction: column; height: 100%; }
+/* overflow:hidden is a backstop so the app shell never scrolls the whole document — inner
+   panels (.left/.right, .tabbody, .preview, .zoompan) own their own scrolling. Without it,
+   any single child that fails to shrink spills the entire layout (clipped topbar / off-screen
+   panels). */
+.shell { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
 
 .topbar {
   display: flex; align-items: center; gap: 8px;
   padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line);
 }
-.brand { font-weight: 600; margin-right: 8px; white-space: nowrap; }
+.brand { font-weight: 600; margin-right: 8px; white-space: nowrap; display: inline-flex; align-items: center; gap: 7px; font-size: 14px; }
+.brand-logo { height: 22px; width: auto; display: block; }
 .topbar .busy { margin-left: auto; color: var(--muted); }
 .langselect {
   margin-left: 12px;
@@ -87,6 +92,17 @@ h4 { font-size: 11px; color: var(--muted); margin: 0 0 4px; }
 .tag.lowpoly { background: #2f4a35; color: #9dffb5; }
 .tag.unknown { background: #3a3c46; color: var(--muted); }
 .tag.ok { background: #2f4a35; color: var(--ok); }
+.tag.bad { background: #4a2f2f; color: var(--err); }
+
+/* Optimization honesty summary (MVP3 §2 Goal D) */
+.optsummary { display: flex; flex-direction: column; gap: 4px; }
+.optsummary table.optdeltas td:last-child { white-space: nowrap; }
+.optverdict { margin-top: 6px; padding: 6px 10px; border-radius: 6px; font-size: 12px; background: var(--line); }
+.optverdict.v-meaningful { background: #2f4a35; color: var(--ok); }
+.optverdict.v-minor_packing_only { background: #3a3520; color: var(--warn); }
+.optverdict.v-needs_better_packing { background: #3a3520; color: var(--warn); }
+.optverdict.v-consider_seam_edits { background: #4a2f2f; color: var(--err); }
+.optverdict.v-baseline_retained { background: #3a3c46; color: var(--muted); }
 
 .field { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; }
 .field input { background: var(--bg); border: 1px solid var(--line); color: var(--text); border-radius: 6px; padding: 6px; }
@@ -99,7 +115,12 @@ table.metrics td:last-child { text-align: right; font-variant-numeric: tabular-n
 
 .warnlist { margin: 0; padding-left: 16px; color: var(--warn); font-size: 12px; }
 
-.preview { flex: 1; display: flex; align-items: center; justify-content: center; padding: 16px; }
+/* min-height/min-width:0 lets the preview shrink inside its flex column so a large
+   checker/layout image (rendered at ~900px) is contained instead of forcing the center
+   column taller than the viewport — which scrolled the whole document and broke the layout
+   (topbar clipped, black spill below the footer, right panel pushed off-screen). Matches
+   the .zoompan / .beforeafter containers, which already carry min-height:0. */
+.preview { flex: 1; min-height: 0; min-width: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; padding: 16px; }
 .preview img { max-width: 100%; max-height: 100%; object-fit: contain; background: #111; border: 1px solid var(--line); }
 .placeholder { color: var(--muted); text-align: center; }
 

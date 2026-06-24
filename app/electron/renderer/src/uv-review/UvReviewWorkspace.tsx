@@ -147,7 +147,7 @@ export function UvReviewWorkspace(props: {
       <div className="subtoolbar">
         <button disabled={!project} onClick={onInspect}>{t('review.inspectUv')}</button>
         <button disabled={!canReview} className="primary" onClick={onReview}>{t('review.reviewUv')}</button>
-        <button disabled title={t('review.nextSeamTitle')}>{t('review.nextSeam')}</button>
+        <button disabled title={t('review.nextGenerateTitle')}>{t('review.nextGenerate')}</button>
         {project && <span className="muted small subtoolbar-hint">{project.name}</span>}
       </div>
 

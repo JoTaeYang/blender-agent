@@ -640,27 +640,37 @@ def _run_user_seam_uv(obj, mesh: MeshGraph, spec, *, config: ChartGateConfig,
         lo_cfg = layout_optimization_config or LayoutOptimizationConfig(
             enabled=True, mode="user_reference")
 
+        def _apply_spec(sp):
+            """Unwrap+pack ``final_seams`` per ``sp``; for a custom backend, follow with the
+            island-level density-normalize/orient + MaxRects/shelf re-pack (MVP3 §2 Goal B,
+            §5). Never touches the seam set."""
+            unwrap_and_pack(obj, final_seams, margin=sp["margin"], method=sp["unwrap_method"],
+                            minimize_iters=sp["minimize_iters"], pack_shape=sp["pack_shape"],
+                            rotate=sp["rotate"], average_scale=sp["average_scale"])
+            if sp.get("pack_backend", "blender") != "blender":
+                from chart_uv_agent.island_layout import repack_uv_islands_custom
+                repack_uv_islands_custom(
+                    obj, mesh, seams=final_seams, padding=sp["margin"],
+                    algorithm=sp["pack_backend"], allow_rotate=sp["rotate"],
+                    density_normalize=sp.get("density_normalize", True),
+                    orient_long_islands=sp.get("orient_long_islands", False))
+
         def _measure_candidate(cand_spec):
-            unwrap_and_pack(obj, final_seams, margin=cand_spec["margin"],
-                            method=cand_spec["unwrap_method"],
-                            minimize_iters=cand_spec["minimize_iters"],
-                            pack_shape=cand_spec["pack_shape"], rotate=cand_spec["rotate"],
-                            average_scale=cand_spec["average_scale"])
+            _apply_spec(cand_spec)
             return _eval_current()[0]
 
         layout_opt = run_layout_optimization(_measure_candidate, dict(metrics), lo_cfg,
                                              mode="user_reference")
-        sp = layout_opt.selected_spec
-        unwrap_and_pack(obj, final_seams, margin=sp["margin"], method=sp["unwrap_method"],
-                        minimize_iters=sp["minimize_iters"], pack_shape=sp["pack_shape"],
-                        rotate=sp["rotate"], average_scale=sp["average_scale"])
+        _apply_spec(layout_opt.selected_spec)
         metrics, gate, ev = _eval_current()   # the shipped (best) layout
         history.append({"stage": "layout_optimization",
                         "selected_candidate_id": layout_opt.selected_candidate_id,
                         "kept_baseline": layout_opt.kept_baseline,
                         "candidate_count": len(layout_opt.candidates),
+                        "pack_backend": layout_opt.selected_spec.get("pack_backend", "blender"),
                         "score_before": round(float(layout_opt.score_before), 6),
-                        "score_after": round(float(layout_opt.score_after), 6)})
+                        "score_after": round(float(layout_opt.score_after), 6),
+                        "verdict": layout_opt.verdict()})
 
     seam_types = _classify_user_seams(mesh, final_seams, usr, aux_seams, distortion_seams,
                                       fold_angle=spec.mandatory_fold_angle,

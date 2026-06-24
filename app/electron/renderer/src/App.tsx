@@ -12,15 +12,20 @@ import { SeamEditorWorkspace } from './seam-editor/SeamEditorWorkspace';
 import { UvGenerateWorkspace } from './uv-generate/UvGenerateWorkspace';
 import { ExportWorkspace } from './export/ExportWorkspace';
 import { useI18n, type Lang, type TFunc, type TKey } from './i18n';
+import logoUrl from './assets/logo.png';
 
 export type Banner = { kind: 'error' | 'info'; text: string } | null;
 type Mode = 'review' | 'seam' | 'generate' | 'export' | 'prepare';
 type FlowState = 'done' | 'ready' | 'blocked';
 
+// NOTE: the Seam Editor step is intentionally HIDDEN from the flow nav for now — the
+// editor's quality isn't presentable yet, and Generate + Optimize works without it (it
+// derives a seam source from the existing UV layer selected in Review, see getFlowState's
+// hasSeamSource). To restore, re-add the `seam` entry below; the render block + workspace
+// are still wired in App, only the tab is hidden.
 const FLOW: { mode: Mode; tabKey: TKey; prerequisiteKey: TKey }[] = [
   { mode: 'prepare', tabKey: 'app.tab.prepare', prerequisiteKey: 'app.flow.needProject' },
   { mode: 'review', tabKey: 'app.tab.review', prerequisiteKey: 'app.flow.needModel' },
-  { mode: 'seam', tabKey: 'app.tab.seam', prerequisiteKey: 'app.flow.needObject' },
   { mode: 'generate', tabKey: 'app.tab.generate', prerequisiteKey: 'app.flow.needSeams' },
   { mode: 'export', tabKey: 'app.tab.export', prerequisiteKey: 'app.flow.needGeneratedUv' },
 ];
@@ -72,7 +77,10 @@ export function App(): JSX.Element {
   return (
     <div className="shell">
       <header className="topbar">
-        <span className="brand">{t('app.brand')}</span>
+        <span className="brand">
+          <img className="brand-logo" src={logoUrl} alt="" aria-hidden="true" />
+          {t('app.brand')}
+        </span>
         <button onClick={onImport}>{t('app.importLowpoly')}</button>
         <button onClick={onOpen}>{t('common.openProject')}</button>
         <nav className="modetabs" aria-label={t('app.flowLabel')}>

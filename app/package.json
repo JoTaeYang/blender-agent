@@ -1,11 +1,14 @@
 {
-  "name": "uv-review-app",
+  "name": "reforge",
+  "productName": "Reforge",
   "version": "0.1.0",
-  "description": "Electron UV Review App — MVP 0 high-to-low preparation workflow",
+  "description": "Reforge — AI-assisted game-ready 3D asset pipeline (retopology, UV optimization, export)",
   "main": "out/main/index.js",
   "author": "",
   "license": "MIT",
   "scripts": {
+    "brand:dev": "node scripts/brand-dev-electron.mjs",
+    "predev": "node scripts/brand-dev-electron.mjs",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",

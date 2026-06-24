@@ -489,7 +489,11 @@ function CandidateTable(props: {
                 <td>{c.unwrap_method === 'MINIMUM_STRETCH' ? 'SLIM' : 'ABF'}</td>
                 <td>{c.minimize_iters}</td>
                 <td>{fmtNum(c.margin, 3)}</td>
-                <td>{c.pack_shape}</td>
+                <td>
+                  {c.pack_backend && c.pack_backend !== 'blender'
+                    ? `${c.pack_backend}${c.orient_long_islands ? '+orient' : ''}`
+                    : c.pack_shape}
+                </td>
                 <td>{c.rotate ? t('common.yes') : t('common.no')}</td>
                 <td>{fmtNum(m.stretch_score)}</td>
                 <td>{fmtNum(m.worst_island_distortion)}</td>
@@ -570,19 +574,18 @@ function GenerateRightPanel(props: {
                 })}
               </div>
             ) : null}
-            {lo?.enabled && (
-              <table className="metrics">
-                <tbody>
-                  <tr><td>{t('generate.row.packing')}</td><td>{fmtNum(lo.packing_efficiency_before)} → {fmtNum(lo.packing_efficiency_after)}</td></tr>
-                  <tr><td>{t('generate.row.stretch')}</td><td>{fmtNum(lo.stretch_before)} → {fmtNum(lo.stretch_after)}</td></tr>
-                </tbody>
-              </table>
-            )}
           </div>
         ) : (
           <div className="muted">{t('generate.noRun')}</div>
         )}
       </section>
+
+      {lo?.enabled && (
+        <section>
+          <h3>{t('generate.optimization')}</h3>
+          <OptimizationSummary lo={lo} seamSource={summary?.seam_source ?? null} integrity={integrity} />
+        </section>
+      )}
 
       <section>
         <h3>{t('common.metrics')}</h3>
@@ -660,6 +663,83 @@ function SeamIntegrityBlock(props: {
         </tbody>
       </table>
     </>
+  );
+}
+
+/**
+ * Honest optimization summary (plan §2 Goal D). Shows the seam source + derived seam
+ * count, the packing / stretch / texel before→after deltas with a per-row verdict tag,
+ * and one overall result line so the user can tell whether the optimization actually
+ * helped — never implying a win the metrics do not support.
+ */
+function OptimizationSummary(props: {
+  lo: NonNullable<UvGenerateRunView['summary']>['layout_optimization'];
+  seamSource: SeamSource | null;
+  integrity: SeamIntegrity | null;
+}): JSX.Element {
+  const t = useT();
+  const { lo, seamSource, integrity } = props;
+  const verdict = (lo.verdict ?? (lo.kept_baseline ? 'baseline_retained' : 'minor_packing_only')) as string;
+  const verdictKey = `generate.verdict.${verdict}` as TKey;
+  const seamCount = integrity?.final_seam_count ?? integrity?.user_seam_count ?? null;
+  const derived = !!seamSource?.derived;
+  return (
+    <div className="optsummary">
+      <div className="muted small">
+        {derived
+          ? t('generate.sourceExistingUv', { layer: seamSource?.uv_layer ?? '—' })
+          : t('generate.sourceExplicitSpec')}
+      </div>
+      {seamCount != null && (
+        <div className="muted small">{t('generate.derivedSeams', { n: seamCount.toLocaleString() })}</div>
+      )}
+      <table className="metrics optdeltas">
+        <tbody>
+          <DeltaRow label={t('generate.row.packing')} before={lo.packing_efficiency_before} after={lo.packing_efficiency_after} higherBetter />
+          <DeltaRow label={t('generate.row.stretch')} before={lo.stretch_before} after={lo.stretch_after} higherBetter={false} />
+          <DeltaRow label={t('generate.row.texel')} before={lo.texel_density_before} after={lo.texel_density_after} higherBetter={false} />
+        </tbody>
+      </table>
+      <div className={`optverdict v-${verdict}`}>
+        {t('generate.optResult', { verdict: t(verdictKey) })}
+      </div>
+    </div>
+  );
+}
+
+/** One before→after row with a percentage change and an honest delta tag. */
+function DeltaRow(props: {
+  label: string;
+  before: number | null | undefined;
+  after: number | null | undefined;
+  higherBetter: boolean;
+}): JSX.Element {
+  const t = useT();
+  const { before, after, higherBetter } = props;
+  const has = typeof before === 'number' && typeof after === 'number';
+  const delta = has ? (after as number) - (before as number) : 0;
+  const pct = has && Math.abs(before as number) > 1e-9 ? (delta / (before as number)) * 100 : 0;
+  // Classify: unchanged (~0), improved (in the better direction & non-trivial), else worse.
+  let tag: 'unchanged' | 'improved' | 'minor' | 'worse' = 'unchanged';
+  if (has && Math.abs(delta) > 1e-5) {
+    const better = higherBetter ? delta > 0 : delta < 0;
+    if (better) tag = Math.abs(pct) >= 5 ? 'improved' : 'minor';
+    else tag = 'worse';
+  }
+  const tagKey = `generate.delta.${tag}` as TKey;
+  return (
+    <tr>
+      <td>{props.label}</td>
+      <td>
+        {fmtNum(before)} → {fmtNum(after)}
+        {has && Math.abs(delta) > 1e-5 && (
+          <span className="muted small"> ({pct > 0 ? '+' : ''}{pct.toFixed(1)}%)</span>
+        )}{' '}
+        <span className={`tag ${tag === 'improved' || tag === 'minor' ? 'ok' : tag === 'worse' ? 'bad' : 'unknown'}`}>
+          {t(tagKey)}
+        </span>
+      </td>
+    </tr>
   );
 }
 

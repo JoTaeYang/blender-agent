@@ -166,6 +166,28 @@ export interface SeamIntegrity {
   valid: boolean;
 }
 
+/** The honest optimization verdict (plan §2 Goal D status 문구). */
+export const OptimizationVerdict = {
+  Meaningful: 'meaningful',
+  MinorPackingOnly: 'minor_packing_only',
+  BaselineRetained: 'baseline_retained',
+  NeedsBetterPacking: 'needs_better_packing',
+  ConsiderSeamEdits: 'consider_seam_edits',
+} as const;
+export type OptimizationVerdict = (typeof OptimizationVerdict)[keyof typeof OptimizationVerdict];
+
+/** Packing/stretch/texel deltas + meaningful flag (plan §2 Goal C). */
+export interface OptimizationImprovement {
+  meaningful: boolean;
+  packing_delta: number;
+  stretch_delta: number;
+  texel_density_delta: number;
+  score_ratio: number;
+  packing_meaningful: boolean;
+  texel_meaningful: boolean;
+  score_meaningful: boolean;
+}
+
 export interface LayoutOptimizationBlock {
   enabled: boolean;
   selected_candidate_id?: string | null;
@@ -177,6 +199,11 @@ export interface LayoutOptimizationBlock {
   packing_efficiency_after?: number | null;
   stretch_before?: number | null;
   stretch_after?: number | null;
+  // MVP3 §2 Goal C/D: honest improvement + verdict the UI shows verbatim.
+  texel_density_before?: number | null;
+  texel_density_after?: number | null;
+  improvement?: OptimizationImprovement;
+  verdict?: OptimizationVerdict | string;
 }
 
 /** Stable artifact keys -> run-relative filenames (plan §4.1). */
@@ -234,6 +261,10 @@ export interface CandidateRow {
   pack_shape: string | null;
   rotate: boolean;
   average_scale: boolean;
+  // MVP3 §2 Goal B: island-level custom packing backend + pre-pass flags.
+  pack_backend?: string;
+  orient_long_islands?: boolean;
+  density_normalize?: boolean;
   accepted: boolean;
   reason: string;
   score: number | null;

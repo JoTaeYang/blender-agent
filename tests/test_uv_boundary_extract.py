@@ -106,6 +106,27 @@ def test_mesh_boundary_edges_reported_not_seamed():
     report = res.report()
     assert report["boundary_edge_count"] == 0
     assert report["uv_layer_missing"] is False
+    # MVP3 §2 Goal A: the report explains a low boundary count via island_count + method.
+    assert report["island_count"] == 1            # continuous UVs -> one welded island
+    assert report["mesh_boundary_edge_count"] == 6
+    assert report["method"] == "uv_loop_discontinuity"
+
+
+def test_report_island_count_grows_when_uv_is_cut():
+    """A cut UV yields two islands; the report's island_count reflects it (Goal A)."""
+    mesh = _two_quads()
+    uvmap = UVMap.for_mesh(mesh)
+    _set_loop_uv(mesh, uvmap, 0, 0, 0.0, 0.0)
+    _set_loop_uv(mesh, uvmap, 0, 1, 1.0, 0.0)
+    _set_loop_uv(mesh, uvmap, 0, 2, 1.0, 1.0)
+    _set_loop_uv(mesh, uvmap, 0, 3, 0.0, 1.0)
+    _set_loop_uv(mesh, uvmap, 1, 1, 5.0, 0.0)
+    _set_loop_uv(mesh, uvmap, 1, 4, 6.0, 0.0)
+    _set_loop_uv(mesh, uvmap, 1, 5, 6.0, 1.0)
+    _set_loop_uv(mesh, uvmap, 1, 2, 5.0, 1.0)
+    res = extract_uv_boundary_seams(mesh, uvmap)
+    assert res.island_count == 2
+    assert res.report()["island_count"] == 2
 
 
 def test_extracted_spec_loads_as_user_seam_spec():

@@ -115,6 +115,28 @@ def test_build_layout_optimization_block_flattens_before_after():
     assert blk["packing_efficiency_before"] == 0.583109
     assert blk["packing_efficiency_after"] == 0.591278
     assert blk["stretch_before"] == 0.06866
+    # MVP3 §2 Goal C/D: the block carries an honest improvement + verdict. The §0 pottery
+    # run only nudged packing 0.583 -> 0.591 (well under the 0.05 bar) and stays below the
+    # 0.65 target, so it is NOT meaningful and the verdict asks for better packing.
+    assert blk["improvement"]["meaningful"] is False
+    assert abs(blk["improvement"]["packing_delta"] - 0.008169) < 1e-6
+    assert blk["verdict"] == "needs_better_packing"
+    assert blk["texel_density_before"] is None or isinstance(blk["texel_density_before"], (int, float))
+
+
+def test_compute_improvement_meaningful_when_packing_jumps_past_target():
+    before = {"packing_efficiency": 0.58, "stretch_score": 0.07, "texel_density_variance": 0.01}
+    after = {"packing_efficiency": 0.70, "stretch_score": 0.069, "texel_density_variance": 0.01}
+    imp = contract.compute_improvement(before, after, -0.5, -0.9)
+    assert imp["meaningful"] is True
+    v = contract.improvement_verdict(imp, kept_baseline=False, packing_after=0.70)
+    assert v == "meaningful"
+
+
+def test_improvement_verdict_keeps_baseline_when_good_and_unchanged():
+    imp = contract.compute_improvement(
+        {"packing_efficiency": 0.7}, {"packing_efficiency": 0.7}, -1.0, -1.0)
+    assert contract.improvement_verdict(imp, kept_baseline=True, packing_after=0.7) == "baseline_retained"
 
 
 # --- summary builder (plan §4.1) -------------------------------------------

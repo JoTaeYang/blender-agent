@@ -178,6 +178,13 @@ def extract_uv_boundary_edges(
     report = boundary.report()
     report["uv_layer"] = resolved
     report["requested_uv_layer"] = layer_name
+    report["uv_layer_loop_count"] = len(uvmap.uv)
+    report["mesh_edge_count"] = mesh.edge_count
+    # Edges the boundary pass could not resolve to a clean cut (non-manifold / unreadable
+    # loops). Surfaced so a partial extraction is visible rather than silently dropped
+    # (MVP3 §2 Goal A "boundary 추출이 partial이면 수정한다").
+    report["dropped_or_ambiguous_edges"] = sorted(
+        set(boundary.ambiguous_edges) | set(boundary.non_manifold_edges))
     return list(boundary.seam_edges), report
 
 

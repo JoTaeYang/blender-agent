@@ -27,18 +27,33 @@ import math
 
 
 def default_score_weights() -> dict[str, float]:
-    """Plan §7.4 score weights. Lower score == better layout. Checker stretch dominates,
-    then the worst single island, then texel-density uniformity and overlap; packing
-    efficiency carries a NEGATIVE weight (higher packing lowers the score)."""
+    """Score weights (plan §7.4 + MVP3 §2 Goal C). Lower score == better layout. Checker
+    stretch dominates, then the worst single island; texel-density uniformity is weighted
+    heavily so a candidate that worsens density is strongly rejected (MVP3 §2 Goal C item
+    2), and packing efficiency carries a larger NEGATIVE weight so a real packing gain wins
+    (MVP3 §2 Goal C item 1 — Blender pack deltas were too small to ever swing the prior
+    -1.5 weight)."""
     return {
         "stretch_score": 4.0,
         "worst_island_distortion": 3.0,
-        "texel_density_variance": 2.0,
+        "texel_density_variance": 4.0,
         "raster_overlap_ratio": 2.0,
         "overlap_ratio": 1.0,
-        "packing_efficiency": -1.5,
+        "packing_efficiency": -3.0,
         "small_island_ratio": 0.2,
     }
+
+
+# Meaningful-improvement thresholds (MVP3 §2 Goal C "권장 기준"). A layout change is only
+# "meaningful" to the user when packing jumps, texel variance drops sharply, OR the score
+# improves by a clear margin — otherwise it is a minor/packing-only change.
+MEANINGFUL_PACKING_DELTA = 0.05
+MEANINGFUL_TEXEL_FACTOR = 0.75
+MEANINGFUL_SCORE_RATIO = 0.10
+# Packing efficiency the plan asks the optimizer to reach for the pottery asset (MVP3 §2
+# Goal B / §7 acceptance). Used only to phrase the honest UI verdict, never to gate-pass.
+PACKING_GOOD_TARGET = 0.65
+PACKING_POOR = 0.50
 
 
 @dataclass(frozen=True)
@@ -53,6 +68,15 @@ class LayoutOptimizationConfig:
     pack_shapes: tuple[str, ...] = ("CONCAVE", "AABB")
     rotate_options: tuple[bool, ...] = (True,)
     average_scale: bool = True
+    # Island-level custom packing backends (MVP3 §2 Goal B / §4). ``"blender"`` is the
+    # built-in CONCAVE/AABB ``pack_islands`` family (the ``pack_shapes`` product above);
+    # ``"maxrects"`` / ``"shelf"`` run the geometry packer over the read-back UVs, with an
+    # optional density-normalize + long-island orientation pre-pass.
+    pack_backends: tuple[str, ...] = ("maxrects", "shelf")
+    custom_unwrap_methods: tuple[str, ...] = ("MINIMUM_STRETCH",)
+    custom_margins: tuple[float, ...] = (0.002, 0.005)
+    orient_options: tuple[bool, ...] = (False, True)
+    density_normalize: bool = True
     max_candidates: int = 24
     require_no_overlap: bool = True
     # Baseline-retention tolerances (plan §7.5): a candidate may only WIN if it does not
@@ -91,11 +115,17 @@ class LayoutCandidate:
     score: float
     accepted: bool          # passed the hard-reject filter (a valid candidate)
     reason: str = ""        # why selected ("best_score") / rejected (the failing rule)
+    pack_backend: str = "blender"        # "blender" | "maxrects" | "shelf" (MVP3 §2 Goal B)
+    orient_long_islands: bool = False
+    density_normalize: bool = True
 
     def to_dict(self) -> dict:
         return {"id": self.id, "unwrap_method": self.unwrap_method,
                 "minimize_iters": self.minimize_iters, "margin": self.margin,
                 "pack_shape": self.pack_shape, "rotate": self.rotate,
+                "pack_backend": self.pack_backend,
+                "orient_long_islands": self.orient_long_islands,
+                "density_normalize": self.density_normalize,
                 "metrics": self.metrics, "score": round(float(self.score), 6),
                 "accepted": self.accepted, "reason": self.reason}
 
@@ -111,12 +141,23 @@ class LayoutOptimizationResult:
     selected_spec: dict
     kept_baseline: bool
 
+    def improvement(self) -> dict:
+        """The packing/stretch/texel deltas + meaningful verdict (MVP3 §2 Goal C)."""
+        return compute_improvement(self.before_metrics, self.after_metrics,
+                                   self.score_before, self.score_after)
+
+    def verdict(self) -> str:
+        """The honest one-word verdict key (MVP3 §2 Goal D)."""
+        return improvement_verdict(self.improvement(), kept_baseline=self.kept_baseline,
+                                   packing_after=self.after_metrics.get("packing_efficiency"))
+
     def report(self) -> dict:
         return {"enabled": True, "selected_candidate_id": self.selected_candidate_id,
                 "kept_baseline": self.kept_baseline,
                 "score_before": round(float(self.score_before), 6),
                 "score_after": round(float(self.score_after), 6),
                 "before_metrics": self.before_metrics, "after_metrics": self.after_metrics,
+                "improvement": self.improvement(), "verdict": self.verdict(),
                 "candidates": [c.to_dict() for c in self.candidates]}
 
     def summary(self) -> dict:
@@ -129,7 +170,8 @@ class LayoutOptimizationResult:
                 "stretch_before": _g(self.before_metrics, "stretch_score"),
                 "stretch_after": _g(self.after_metrics, "stretch_score"),
                 "worst_island_before": _g(self.before_metrics, "worst_island_distortion"),
-                "worst_island_after": _g(self.after_metrics, "worst_island_distortion")}
+                "worst_island_after": _g(self.after_metrics, "worst_island_distortion"),
+                "improvement": self.improvement(), "verdict": self.verdict()}
 
 
 def _g(m: dict, key: str):
@@ -153,27 +195,50 @@ def make_config(preset: str = "user_reference", *, max_candidates: int | None = 
 
 
 def candidate_specs(config: LayoutOptimizationConfig) -> list[dict]:
-    """The candidate axis-product (plan §7.2), capped at ``config.max_candidates``.
+    """The candidate axis-product (plan §7.2 + MVP3 §2 Goal B / §4), capped at
+    ``config.max_candidates``.
 
-    ``MINIMUM_STRETCH`` (SLIM) is locally injective; we do NOT bolt Blender's
-    ``minimize_stretch`` onto it (it is non-injective and would re-fold) — so SLIM
-    candidates always carry ``minimize_iters=0``. ``minimize_stretch`` iteration counts
-    apply ONLY to ``ANGLE_BASED`` (plan §7.2 caveat). The first spec is the baseline so the
-    baseline measure and candidate #0 are the same config."""
+    Two families:
+
+    - BLENDER pack: the original ``unwrap_methods × minimize_iters × margins × pack_shapes``
+      product. ``MINIMUM_STRETCH`` (SLIM) is locally injective; we do NOT bolt Blender's
+      ``minimize_stretch`` onto it (it is non-injective and would re-fold) — so SLIM
+      candidates always carry ``minimize_iters=0``; ``minimize_stretch`` iterations apply
+      ONLY to ``ANGLE_BASED`` (plan §7.2 caveat).
+    - CUSTOM pack (MVP3 §2 Goal B): ``custom_unwrap_methods × custom_margins × pack_backends
+      × orient_options`` with per-island density normalize, run through the MaxRects/shelf
+      geometry packer. These yield the meaningful packing gains the plan asks for.
+
+    The first spec is always the baseline (so the baseline measure and candidate #0 share a
+    config). Custom candidates are emitted right after the baseline — BEFORE the large
+    Blender product — so they survive the ``max_candidates`` slice (the Blender product alone
+    already fills the default cap, plan §0)."""
     specs: list[dict] = []
     seen: set[tuple] = set()
 
-    def add(method, iters, margin, shape, rotate):
-        key = (method, iters, margin, shape, rotate)
+    def add(method, iters, margin, shape, rotate, *, backend="blender",
+            orient=False, density=None):
+        density = config.average_scale if density is None else density
+        key = (method, iters, margin, shape, rotate, backend, orient, density)
         if key in seen:
             return
         seen.add(key)
         specs.append({"unwrap_method": method, "minimize_iters": iters, "margin": margin,
-                      "pack_shape": shape, "rotate": rotate,
-                      "average_scale": config.average_scale})
+                      "pack_shape": shape, "rotate": rotate, "average_scale": config.average_scale,
+                      "pack_backend": backend, "orient_long_islands": orient,
+                      "density_normalize": density})
 
+    # #0 baseline (Blender CONCAVE).
     add(*[BASELINE_SPEC[k] for k in
           ("unwrap_method", "minimize_iters", "margin", "pack_shape", "rotate")])
+    # Custom-pack candidates first (the high-value family, MVP3 §2 Goal B).
+    for method in config.custom_unwrap_methods:
+        for margin in config.custom_margins:
+            for backend in config.pack_backends:
+                for orient in config.orient_options:
+                    add(method, 0, margin, "CONCAVE", True, backend=backend,
+                        orient=orient, density=config.density_normalize)
+    # Blender-pack product.
     for method in config.unwrap_methods:
         iter_opts = config.angle_based_minimize_iters if method == "ANGLE_BASED" else (0,)
         for iters in iter_opts:
@@ -185,16 +250,77 @@ def candidate_specs(config: LayoutOptimizationConfig) -> list[dict]:
 
 
 def spec_id(spec: dict) -> str:
-    """Stable, readable candidate id (plan §11 report key, e.g. ``slim_concave_m005``)."""
+    """Stable, readable candidate id (plan §11 / MVP3 §2 Goal B examples). Blender candidates
+    keep the original ``<method>_<shape>_m<margin>`` key (so ``slim_concave_m005`` is
+    unchanged); custom-pack candidates read ``<method>_custom[_orient]_<backend>_m<margin>``
+    (e.g. ``slim_custom_maxrects_m002`` / ``slim_custom_orient_maxrects_m002``)."""
     method = "slim" if spec["unwrap_method"] == "MINIMUM_STRETCH" else "abf"
-    shape = str(spec["pack_shape"]).lower()
+    backend = spec.get("pack_backend", "blender")
     margin = f"m{int(round(spec['margin'] * 1000)):03d}"
-    parts = [method, shape, margin]
+    if backend == "blender":
+        parts = [method, str(spec["pack_shape"]).lower(), margin]
+    else:
+        parts = [method, "custom"]
+        if spec.get("orient_long_islands"):
+            parts.append("orient")
+        parts += [backend, margin]
     if spec["minimize_iters"]:
         parts.append(f"min{int(spec['minimize_iters'])}")
     if not spec.get("rotate", True):
         parts.append("norot")
     return "_".join(parts)
+
+
+def compute_improvement(before_metrics: dict, after_metrics: dict,
+                        score_before: float, score_after: float) -> dict:
+    """Quantify the optimization gain (MVP3 §2 Goal C). Returns the packing / stretch /
+    texel-density deltas plus a ``meaningful`` verdict using the plan's "권장 기준":
+    meaningful iff packing rose by ≥ :data:`MEANINGFUL_PACKING_DELTA`, OR texel variance
+    dropped to ≤ :data:`MEANINGFUL_TEXEL_FACTOR` of before, OR the score improved by ≥
+    :data:`MEANINGFUL_SCORE_RATIO`."""
+    def g(m, k):
+        v = (m or {}).get(k)
+        return float(v) if isinstance(v, (int, float)) else 0.0
+
+    pb, pa = g(before_metrics, "packing_efficiency"), g(after_metrics, "packing_efficiency")
+    sb, sa = g(before_metrics, "stretch_score"), g(after_metrics, "stretch_score")
+    tb, ta = g(before_metrics, "texel_density_variance"), g(after_metrics, "texel_density_variance")
+    packing_delta = pa - pb
+    score_gain = float(score_before) - float(score_after)
+    score_ratio = score_gain / abs(score_before) if abs(score_before) > 1e-9 else 0.0
+
+    meaningful_packing = packing_delta >= MEANINGFUL_PACKING_DELTA
+    meaningful_texel = tb > 1e-9 and ta <= tb * MEANINGFUL_TEXEL_FACTOR
+    meaningful_score = score_ratio >= MEANINGFUL_SCORE_RATIO
+    return {
+        "meaningful": bool(meaningful_packing or meaningful_texel or meaningful_score),
+        "packing_delta": round(packing_delta, 6),
+        "stretch_delta": round(sa - sb, 6),
+        "texel_density_delta": round(ta - tb, 6),
+        "score_ratio": round(score_ratio, 6),
+        "packing_meaningful": bool(meaningful_packing),
+        "texel_meaningful": bool(meaningful_texel),
+        "score_meaningful": bool(meaningful_score),
+    }
+
+
+def improvement_verdict(improvement: dict, *, kept_baseline: bool,
+                        packing_after: float | None) -> str:
+    """Map an :func:`compute_improvement` result to one honest UI verdict key (MVP3 §2 Goal D
+    status 문구). One of: ``meaningful`` / ``minor_packing_only`` / ``baseline_retained`` /
+    ``needs_better_packing`` / ``consider_seam_edits``."""
+    if improvement.get("meaningful"):
+        return "meaningful"
+    pa = packing_after if isinstance(packing_after, (int, float)) else None
+    if pa is not None and pa < PACKING_POOR:
+        return "consider_seam_edits"
+    if pa is not None and pa < PACKING_GOOD_TARGET:
+        return "needs_better_packing"
+    if kept_baseline:
+        return "baseline_retained"
+    if improvement.get("packing_delta", 0.0) > 0:
+        return "minor_packing_only"
+    return "baseline_retained"
 
 
 def candidate_is_valid(metrics: dict, *, mode: str = "user_reference",
@@ -323,7 +449,10 @@ def run_layout_optimization(measure_candidate, baseline_metrics: dict,
             minimize_iters=spec["minimize_iters"], margin=spec["margin"],
             pack_shape=spec["pack_shape"], rotate=spec["rotate"], metrics=metrics,
             score=layout_score(metrics, config.score_weights),
-            accepted=valid, reason=("" if valid else reason)))
+            accepted=valid, reason=("" if valid else reason),
+            pack_backend=spec.get("pack_backend", "blender"),
+            orient_long_islands=bool(spec.get("orient_long_islands", False)),
+            density_normalize=bool(spec.get("density_normalize", config.average_scale))))
 
     selected_id, info = select_best_candidate(candidates, baseline_metrics, baseline_score, config)
     by_id = {c.id: c for c in candidates}
@@ -341,7 +470,10 @@ def run_layout_optimization(measure_candidate, baseline_metrics: dict,
         score_after = sel.score
         selected_spec = {"unwrap_method": sel.unwrap_method, "minimize_iters": sel.minimize_iters,
                          "margin": sel.margin, "pack_shape": sel.pack_shape, "rotate": sel.rotate,
-                         "average_scale": config.average_scale}
+                         "average_scale": config.average_scale,
+                         "pack_backend": sel.pack_backend,
+                         "orient_long_islands": sel.orient_long_islands,
+                         "density_normalize": sel.density_normalize}
         kept_baseline = False
         chosen_id = selected_id
 
@@ -355,4 +487,6 @@ def run_layout_optimization(measure_candidate, baseline_metrics: dict,
 __all__ = ["LayoutOptimizationConfig", "LayoutCandidate", "LayoutOptimizationResult",
            "BASELINE_SPEC", "default_score_weights", "make_config", "candidate_specs",
            "spec_id", "candidate_is_valid", "layout_score", "select_best_candidate",
-           "run_layout_optimization"]
+           "run_layout_optimization", "compute_improvement", "improvement_verdict",
+           "MEANINGFUL_PACKING_DELTA", "MEANINGFUL_TEXEL_FACTOR", "MEANINGFUL_SCORE_RATIO",
+           "PACKING_GOOD_TARGET", "PACKING_POOR"]

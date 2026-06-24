@@ -49,6 +49,11 @@ class UvBoundaryResult:
     mesh_boundary_edges: list[int] = field(default_factory=list)
     non_manifold_edges: list[int] = field(default_factory=list)
     ambiguous_edges: list[int] = field(default_factory=list)
+    # The number of UV islands the layer carries (loop-UV connected components), and how the
+    # boundary was derived — surfaced so the run report explains WHY the boundary edge count
+    # is what it is (MVP3 §2 Goal A / §0: derived boundary 724 vs an expected larger count).
+    island_count: int = 0
+    method: str = "uv_loop_discontinuity"
 
     @property
     def boundary_edge_count(self) -> int:
@@ -57,6 +62,11 @@ class UvBoundaryResult:
     def report(self) -> dict:
         return {
             "boundary_edge_count": self.boundary_edge_count,
+            "island_count": self.island_count,
+            "mesh_boundary_edge_count": len(self.mesh_boundary_edges),
+            "ambiguous_boundary_count": len(self.ambiguous_edges),
+            "non_manifold_edge_count": len(self.non_manifold_edges),
+            "method": self.method,
             "mesh_boundary_edges": list(self.mesh_boundary_edges),
             "ambiguous_edges": list(self.ambiguous_edges),
             "non_manifold_edges": list(self.non_manifold_edges),
@@ -130,4 +140,9 @@ def extract_uv_boundary_seams(
     result.mesh_boundary_edges.sort()
     result.non_manifold_edges.sort()
     result.ambiguous_edges.sort()
+    # Island count from loop-UV connectivity (the same definition the review report uses).
+    # A low boundary edge count is explained by a low island count + welded/continuous UVs,
+    # so the report can state why (MVP3 §2 Goal A completion criterion).
+    from uv_agent.geometry.evaluation import uv_islands_from_uvmap
+    result.island_count = len([isl for isl in uv_islands_from_uvmap(mesh, uvmap) if isl])
     return result

@@ -152,12 +152,21 @@ OVERLAP_MAX = 0.001
 DEFAULT_SCORE_WEIGHTS: dict[str, float] = {
     "stretch_score": 4.0,
     "worst_island_distortion": 3.0,
-    "texel_density_variance": 2.0,
+    "texel_density_variance": 4.0,
     "raster_overlap_ratio": 2.0,
     "overlap_ratio": 1.0,
-    "packing_efficiency": -1.5,
+    "packing_efficiency": -3.0,
     "small_island_ratio": 0.2,
 }
+
+# --- Meaningful-improvement thresholds (plan §2 Goal C "권장 기준") ----------
+# Mirror of ``chart_uv_agent.layout_optimization`` so the summary's improvement verdict is
+# computed identically without importing the (Blender-adjacent) module here.
+MEANINGFUL_PACKING_DELTA = 0.05
+MEANINGFUL_TEXEL_FACTOR = 0.75
+MEANINGFUL_SCORE_RATIO = 0.10
+PACKING_GOOD_TARGET = 0.65
+PACKING_POOR = 0.50
 
 # --- Metric subsets (plan §4.1 summary metrics, §5 candidate metrics) -------
 # The full metric dict carries many engine-internal keys; the app surfaces only
@@ -579,6 +588,9 @@ def _normalize_candidate(cand: dict, *, average_scale: bool) -> dict:
         "pack_shape": cand.get("pack_shape"),
         "rotate": bool(cand.get("rotate", True)),
         "average_scale": bool(cand.get("average_scale", average_scale)),
+        "pack_backend": cand.get("pack_backend", "blender"),
+        "orient_long_islands": bool(cand.get("orient_long_islands", False)),
+        "density_normalize": bool(cand.get("density_normalize", True)),
         "accepted": bool(cand.get("accepted", False)),
         "reason": cand.get("reason", "") or "",
         "score": round(float(cand["score"]), 6) if isinstance(cand.get("score"), (int, float)) else cand.get("score"),
@@ -622,11 +634,69 @@ def normalize_candidate_summary(
     }
 
 
+def compute_improvement(before: dict | None, after: dict | None,
+                        score_before: float | None, score_after: float | None) -> dict:
+    """Packing / stretch / texel deltas + a ``meaningful`` verdict (plan §2 Goal C).
+
+    Pure mirror of ``chart_uv_agent.layout_optimization.compute_improvement`` so the
+    candidate_summary / summary computed by either side agree. Meaningful iff packing rose
+    by ≥ :data:`MEANINGFUL_PACKING_DELTA`, OR texel variance dropped to ≤
+    :data:`MEANINGFUL_TEXEL_FACTOR` of before, OR the score improved by ≥
+    :data:`MEANINGFUL_SCORE_RATIO`.
+    """
+    def g(m: dict | None, k: str) -> float:
+        v = (m or {}).get(k)
+        return float(v) if isinstance(v, (int, float)) else 0.0
+
+    pb, pa = g(before, "packing_efficiency"), g(after, "packing_efficiency")
+    sb, sa = g(before, "stretch_score"), g(after, "stretch_score")
+    tb, ta = g(before, "texel_density_variance"), g(after, "texel_density_variance")
+    packing_delta = pa - pb
+    sb_score = float(score_before) if isinstance(score_before, (int, float)) else 0.0
+    sa_score = float(score_after) if isinstance(score_after, (int, float)) else 0.0
+    score_gain = sb_score - sa_score
+    score_ratio = score_gain / abs(sb_score) if abs(sb_score) > 1e-9 else 0.0
+
+    meaningful_packing = packing_delta >= MEANINGFUL_PACKING_DELTA
+    meaningful_texel = tb > 1e-9 and ta <= tb * MEANINGFUL_TEXEL_FACTOR
+    meaningful_score = score_ratio >= MEANINGFUL_SCORE_RATIO
+    return {
+        "meaningful": bool(meaningful_packing or meaningful_texel or meaningful_score),
+        "packing_delta": round(packing_delta, 6),
+        "stretch_delta": round(sa - sb, 6),
+        "texel_density_delta": round(ta - tb, 6),
+        "score_ratio": round(score_ratio, 6),
+        "packing_meaningful": bool(meaningful_packing),
+        "texel_meaningful": bool(meaningful_texel),
+        "score_meaningful": bool(meaningful_score),
+    }
+
+
+def improvement_verdict(improvement: dict, *, kept_baseline: bool,
+                        packing_after: float | None) -> str:
+    """One honest UI verdict key (plan §2 Goal D). Mirror of the layout-optimization helper:
+    ``meaningful`` / ``minor_packing_only`` / ``baseline_retained`` / ``needs_better_packing``
+    / ``consider_seam_edits``."""
+    if improvement.get("meaningful"):
+        return "meaningful"
+    pa = packing_after if isinstance(packing_after, (int, float)) else None
+    if pa is not None and pa < PACKING_POOR:
+        return "consider_seam_edits"
+    if pa is not None and pa < PACKING_GOOD_TARGET:
+        return "needs_better_packing"
+    if kept_baseline:
+        return "baseline_retained"
+    if improvement.get("packing_delta", 0.0) > 0:
+        return "minor_packing_only"
+    return "baseline_retained"
+
+
 def build_layout_optimization_block(layout_report: dict | None) -> dict:
-    """The summary's ``layout_optimization`` block (plan §4.1).
+    """The summary's ``layout_optimization`` block (plan §4.1 + §2 Goal C/D).
 
     Flattens the report's before/after metrics into the headline numbers the UI
-    shows. ``enabled=False`` when no optimization ran.
+    shows, plus the meaningful-improvement block + verdict so the UI can state
+    honestly whether the optimization helped. ``enabled=False`` when no optimization ran.
     """
     report = layout_report or {}
     if not report:
@@ -638,10 +708,16 @@ def build_layout_optimization_block(layout_report: dict | None) -> dict:
         v = m.get(key)
         return round(float(v), 6) if isinstance(v, (int, float)) else v
 
+    improvement = report.get("improvement") or compute_improvement(
+        before, after, report.get("score_before"), report.get("score_after"))
+    kept = bool(report.get("kept_baseline", False))
+    verdict = report.get("verdict") or improvement_verdict(
+        improvement, kept_baseline=kept, packing_after=after.get("packing_efficiency"))
+
     return {
         "enabled": True,
         "selected_candidate_id": report.get("selected_candidate_id"),
-        "kept_baseline": bool(report.get("kept_baseline", False)),
+        "kept_baseline": kept,
         "candidate_count": len(report.get("candidates", []) or []),
         "score_before": _g(report, "score_before"),
         "score_after": _g(report, "score_after"),
@@ -649,6 +725,10 @@ def build_layout_optimization_block(layout_report: dict | None) -> dict:
         "packing_efficiency_after": _g(after, "packing_efficiency"),
         "stretch_before": _g(before, "stretch_score"),
         "stretch_after": _g(after, "stretch_score"),
+        "texel_density_before": _g(before, "texel_density_variance"),
+        "texel_density_after": _g(after, "texel_density_variance"),
+        "improvement": improvement,
+        "verdict": verdict,
     }
 
 

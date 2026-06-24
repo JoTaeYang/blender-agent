@@ -26,6 +26,7 @@ import type {
 import {
   DEFAULT_EXPORT_OPTIONS,
   EXPORT_TERMINAL_STATUSES,
+  GENERATED_UV_LAYER,
   SUPPORTED_EXPORT_FORMATS,
 } from '@shared/contracts';
 import type { Banner } from '../App';
@@ -67,7 +68,10 @@ export function ExportWorkspace(props: {
     setRunView(null);
     setExportId(project?.latest_export_id ?? null);
     setFormats(['fbx', 'obj', 'glb']);
-    setOptions({ ...DEFAULT_EXPORT_OPTIONS, selected_uv_layer: project?.selected_uv_layer ?? null });
+    // Export must ship the MVP 3 OPTIMIZED layer (`AI_UV`), NOT the original review layer
+    // (`project.selected_uv_layer`, e.g. `UVChannel_1`) — pre-filling the latter forced the
+    // un-optimized UVs to export (preview ≠ exported OBJ bug). Default to the generated layer.
+    setOptions({ ...DEFAULT_EXPORT_OPTIONS, selected_uv_layer: GENERATED_UV_LAYER });
     setHistory([]);
     setRollbackTargets([]);
   }, [project?.id]);

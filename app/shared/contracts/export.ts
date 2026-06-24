@@ -86,6 +86,14 @@ export const RollbackTargetType = {
 } as const;
 export type RollbackTargetType = (typeof RollbackTargetType)[keyof typeof RollbackTargetType];
 
+// The UV layer the MVP 3 Generate + Optimize run writes the OPTIMIZED layout onto
+// (mirror of `uv_agent.blender.organic_unwrap.AI_UV_LAYER`). This — NOT the original
+// review layer (`project.selected_uv_layer`, e.g. `UVChannel_1`) — is what export must
+// ship. The OBJ/glTF exporters write the `active_render` layer; the worker activates this
+// one and marks it for render. Defaulting the export UV-layer field to the original review
+// layer was the "exported OBJ ≠ preview" bug (it shipped the un-optimized UVs).
+export const GENERATED_UV_LAYER = 'AI_UV';
+
 // --- Export options (plan §5.1 options block) -----------------------------
 export interface ExportOptions {
   selected_uv_layer?: string | null;

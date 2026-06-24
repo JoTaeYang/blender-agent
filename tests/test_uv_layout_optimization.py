@@ -10,8 +10,8 @@ import math
 
 from chart_uv_agent.layout_optimization import (
     BASELINE_SPEC, LayoutCandidate, LayoutOptimizationConfig, candidate_is_valid,
-    candidate_specs, default_score_weights, layout_score, make_config,
-    run_layout_optimization, select_best_candidate, spec_id,
+    candidate_specs, compute_improvement, default_score_weights, improvement_verdict,
+    layout_score, make_config, run_layout_optimization, select_best_candidate, spec_id,
 )
 
 
@@ -31,8 +31,8 @@ def _clean_metrics(**over):
 def test_layout_score_matches_weighted_sum():
     w = default_score_weights()
     m = _clean_metrics()
-    expected = (4.0 * 0.07 + 3.0 * 0.20 + 2.0 * 0.001 + 2.0 * 0.0
-                + 1.0 * 0.0 - 1.5 * 0.58 + 0.2 * 0.1)
+    expected = (4.0 * 0.07 + 3.0 * 0.20 + 4.0 * 0.001 + 2.0 * 0.0
+                + 1.0 * 0.0 - 3.0 * 0.58 + 0.2 * 0.1)
     assert layout_score(m, w) == expected
 
 
@@ -194,8 +194,8 @@ def test_run_layout_optimization_selects_and_reports():
     baseline = _clean_metrics()
 
     def measure(spec):
-        # The AABB candidate packs better with no regression; everything else == baseline.
-        if spec["pack_shape"] == "AABB":
+        # The custom MaxRects candidate packs better with no regression; else == baseline.
+        if spec.get("pack_backend") == "maxrects":
             return _clean_metrics(packing_efficiency=0.70, stretch_score=0.05)
         return _clean_metrics()
 
@@ -218,3 +218,92 @@ def test_run_layout_optimization_keeps_baseline_when_no_winner():
     res = run_layout_optimization(measure, baseline, cfg, mode="user_reference")
     assert res.kept_baseline
     assert res.selected_spec["unwrap_method"] == BASELINE_SPEC["unwrap_method"]
+
+
+# --- 8. custom pack backends (MVP3 §2 Goal B) -----------------------------------------
+
+def test_custom_pack_candidates_present_and_named():
+    specs = candidate_specs(LayoutOptimizationConfig(max_candidates=64))
+    ids = {spec_id(s) for s in specs}
+    assert "slim_custom_maxrects_m002" in ids
+    assert "slim_custom_orient_maxrects_m002" in ids
+    assert "slim_custom_shelf_m002" in ids
+    # The blender baseline id is unchanged so existing reports/keys stay stable.
+    assert "slim_concave_m005" in ids
+
+
+def test_custom_candidates_survive_small_cap():
+    # The blender product alone fills the default cap; custom candidates must still ship.
+    specs = candidate_specs(LayoutOptimizationConfig(max_candidates=24))
+    backends = {s.get("pack_backend") for s in specs}
+    assert "maxrects" in backends and "shelf" in backends
+
+
+def test_first_candidate_still_baseline_with_custom_family():
+    specs = candidate_specs(LayoutOptimizationConfig(max_candidates=24))
+    assert specs[0]["pack_backend"] == "blender"
+    assert spec_id(specs[0]) == "slim_concave_m005"
+
+
+def test_custom_spec_carries_through_selected_spec():
+    cfg = LayoutOptimizationConfig(max_candidates=6)
+    baseline = _clean_metrics()
+
+    def measure(spec):
+        if spec.get("pack_backend") == "maxrects" and not spec.get("orient_long_islands"):
+            return _clean_metrics(packing_efficiency=0.72, stretch_score=0.05)
+        return _clean_metrics()
+
+    res = run_layout_optimization(measure, baseline, cfg, mode="user_reference")
+    assert not res.kept_baseline
+    assert res.selected_spec["pack_backend"] == "maxrects"
+    assert res.selected_spec["density_normalize"] is True
+
+
+# --- 9. improvement / verdict (MVP3 §2 Goal C/D) --------------------------------------
+
+def test_improvement_meaningful_on_packing_jump():
+    before = _clean_metrics(packing_efficiency=0.58)
+    after = _clean_metrics(packing_efficiency=0.66)
+    imp = compute_improvement(before, after, 0.0, 0.0)
+    assert imp["meaningful"] and imp["packing_meaningful"]
+    assert abs(imp["packing_delta"] - 0.08) < 1e-9
+
+
+def test_improvement_meaningful_on_texel_drop():
+    before = _clean_metrics(texel_density_variance=0.4)
+    after = _clean_metrics(texel_density_variance=0.2)
+    imp = compute_improvement(before, after, 0.0, 0.0)
+    assert imp["meaningful"] and imp["texel_meaningful"]
+
+
+def test_improvement_minor_packing_only():
+    before = _clean_metrics(packing_efficiency=0.66)
+    after = _clean_metrics(packing_efficiency=0.674)  # +0.014, under the 0.05 bar
+    imp = compute_improvement(before, after, 0.0, 0.0)
+    assert not imp["meaningful"]
+    v = improvement_verdict(imp, kept_baseline=False, packing_after=0.674)
+    assert v == "minor_packing_only"
+
+
+def test_verdict_needs_better_packing_below_target():
+    imp = compute_improvement(_clean_metrics(), _clean_metrics(), 0.0, 0.0)
+    assert improvement_verdict(imp, kept_baseline=True, packing_after=0.59) == "needs_better_packing"
+
+
+def test_verdict_consider_seam_edits_when_packing_poor():
+    imp = compute_improvement(_clean_metrics(), _clean_metrics(), 0.0, 0.0)
+    assert improvement_verdict(imp, kept_baseline=True, packing_after=0.4) == "consider_seam_edits"
+
+
+def test_verdict_baseline_retained_when_good_packing_no_change():
+    imp = compute_improvement(_clean_metrics(packing_efficiency=0.7),
+                              _clean_metrics(packing_efficiency=0.7), -1.0, -1.0)
+    assert improvement_verdict(imp, kept_baseline=True, packing_after=0.7) == "baseline_retained"
+
+
+def test_verdict_meaningful_wins():
+    before = _clean_metrics(packing_efficiency=0.58)
+    after = _clean_metrics(packing_efficiency=0.70)
+    imp = compute_improvement(before, after, 0.0, 0.0)
+    assert improvement_verdict(imp, kept_baseline=False, packing_after=0.70) == "meaningful"
