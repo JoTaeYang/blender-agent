@@ -33,3 +33,6 @@ auth.json
 
 # All mesh assets out of git (user request 2026-06-11)
 *.obj
+
+# electron-builder output
+/app/release/

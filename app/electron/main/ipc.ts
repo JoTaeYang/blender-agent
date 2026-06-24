@@ -5,7 +5,7 @@
  * The renderer never touches the filesystem or spawns Blender directly (plan §3).
  */
 
-import { dialog, ipcMain, shell, BrowserWindow } from 'electron';
+import { app, dialog, ipcMain, shell, BrowserWindow } from 'electron';
 import { existsSync, mkdirSync } from 'fs';
 import { join, resolve } from 'path';
 import {
@@ -49,10 +49,20 @@ import { UvGenerateRunner } from './uvGenerate';
 import { ExportRunner } from './exportRunner';
 import { getSettings, setSettings } from './settings';
 
-/** Resolve the repo `worker/` directory from the app bundle location. */
+/** Resolve the `worker/` directory holding the Python/Blender worker scripts.
+ *
+ * Packaged: the Python source tree is shipped as `extraResources` under
+ * `<resources>/pysrc/` (NOT inside asar — Blender runs as a separate process and
+ * can't read asar). The workers `sys.path.insert(dirname(worker_dir))`, so the
+ * agent packages must sit next to `worker/` (i.e. `pysrc/worker`, `pysrc/uv_agent`,
+ * …) — which the electron-builder `extraResources` mapping preserves.
+ *
+ * Dev/build-from-repo: the app dir is `<repo>/app`; workers live at `<repo>/worker`
+ * and `__dirname` is `<repo>/app/out/main`. */
 function resolveWorkerRoot(): string {
-  // In dev/build the app dir is `<repo>/app`; workers live in `<repo>/worker`.
-  // __dirname is `<repo>/app/out/main` (built) — walk up to the repo root.
+  if (app.isPackaged) {
+    return join(process.resourcesPath, 'pysrc', 'worker');
+  }
   const candidates = [
     resolve(__dirname, '../../../worker'),
     resolve(__dirname, '../../worker'),
